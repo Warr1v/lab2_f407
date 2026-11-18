@@ -16,10 +16,12 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/wave_checks'
+ELF_PATH = ROOT / 'build/Debug/lab2_f407.elf'
 sys.path.insert(0, str(OUT / 'python'))
 from elftools.elf.elffile import ELFFile
 from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_MCLASS, UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE
 from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC
+from unicorn.arm_const import UC_CPU_ARM_CORTEX_M4
 
 class Params(C.Structure):
     _fields_ = [('frequency_hz', C.c_uint32), ('duty_bp', C.c_uint16)]
@@ -46,15 +48,17 @@ OK, PENDING, BUSY, INVALID, RANGE, STEP, UNSUPPORTED, NOT_INIT = range(8)
 class Firmware:
     def __init__(self):
         self.uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
+        self.uc.ctl_set_cpu_model(UC_CPU_ARM_CORTEX_M4)
         for base, size in [(0x08000000,0x100000),(0x20000000,0x20000),(0x40000000,0x30000),
                            (0xE0000000,0x100000),(0x30000000,0x10000)]:
             self.uc.mem_map(base,size)
-        with (ROOT / 'build/Debug/lab2_f407.elf').open('rb') as f:
+        with ELF_PATH.open('rb') as f:
             elf = ELFFile(f)
             for s in elf.iter_segments():
                 if s['p_type'] == 'PT_LOAD' and s['p_filesz']: self.uc.mem_write(s['p_vaddr'], s.data())
             self.syms = {s.name:s['st_value'] for s in elf.get_section_by_name('.symtab').iter_symbols()}
         self.now = 1000
+        self.forced_reads = {}
         self.flags = {t:0 for t in (TIM1,TIM8,TIM2)}
         self.active = {t:{} for t in self.flags}
         self.hook('HAL_GetTick', lambda: self.now)
@@ -64,8 +68,15 @@ class Firmware:
         self.hook('HAL_NVIC_SetPriority', lambda: 0)
         self.hook('HAL_NVIC_EnableIRQ', lambda: 0)
         self.write(0x40023808, 0x9400)  # Actual P1 APB divider fields.
-        self.uc.hook_add(UC_HOOK_MEM_WRITE, self.store, begin=0x40000000,end=0x40011000)
-        self.uc.hook_add(UC_HOOK_MEM_READ, self.load, begin=0x40000000,end=0x40011000)
+        # Only SR/EGR and a fault-injected DMA CR need special semantics.
+        # Broad MMIO hooks in Unicorn 2.1.4 leave stale Thumb IT state after
+        # optimized conditional loads/stores; use exact boundary hooks.
+        for t in self.flags:
+            for offset in (0x10,0x14):
+                self.uc.hook_add(UC_HOOK_MEM_WRITE,self.store,begin=t+offset,end=t+offset+3)
+        for t in self.flags:
+            self.uc.hook_add(UC_HOOK_MEM_READ,self.load,begin=t+0x10,end=t+0x13)
+        self.uc.hook_add(UC_HOOK_MEM_READ,self.load,begin=0x40026028,end=0x4002602b)
     def read(self,a): return int.from_bytes(self.uc.mem_read(a,4),'little')
     def write(self,a,v): self.uc.mem_write(a,struct.pack('<I',v & 0xffffffff))
     def hook(self,name,callback):
@@ -80,6 +91,7 @@ class Firmware:
             if a == t+0x10: self.flags[t] &= value  # TIM SR is rc_w0.
             if a == t+0x14 and value&1: self.event(t, software=True)
     def load(self,uc,access,a,size,value,data):
+        if a in self.forced_reads: self.write(a,self.forced_reads[a])
         for t in self.flags:
             if a == t+0x10: self.write(a,self.flags[t])
     def event(self,t,software=False):
@@ -304,6 +316,48 @@ def extended_checks(fw):
     result['dual_extended_duty_cases']=len(rows)
     return result
 
+def standard_duty_checks():
+    f=Firmware()
+    f.call('Wave_Init')
+    cases=0
+    worst=0
+    for ch in (0,1):
+        f.call('Wave_SetEnabled',ch,0,True,0)
+        for hz in (1,10,100,1000,2563,2564,2565,10000,50000,100000,123457,199999,200000):
+            for duty in range(0,10001,100):
+                assert f.apply(ch,hz,duty)==PENDING
+                f.update(ch)
+                s=f.snapshot(ch)
+                assert not s.pending and s.applied.duty_bp==duty
+                assert abs(s.frequency_millihz/(hz*1000)-1)<=.01
+                error=abs(s.duty_bp-duty)/100
+                worst=max(worst,error)
+                assert error<=1
+                assert s.state==(3 if duty==0 else 4 if duty==10000 else 2)
+                cases+=1
+        f.call('Wave_SetEnabled',ch,0,False,0)
+    return {'running_preload_duty_cases':cases,'max_calculated_duty_error_points':worst}
+
+def sync_duty_checks(hz,step):
+    f=Firmware()
+    f.call('Wave_Init')
+    if hz>200000: assert f.call('Wave_SetMode',1)==OK
+    for ch in (0,1):
+        assert f.apply(ch,hz,5000)==OK
+        f.call('Wave_SetEnabled',ch,0,True,0)
+    assert f.call('Wave_SetSync',True)==PENDING
+    f.settle_sync()
+    worst=0
+    for duty in range(0,10001,step):
+        assert f.apply(1,hz,duty)==PENDING
+        f.trigger_b()
+        s=f.snapshot(1)
+        error=abs(s.duty_bp-duty)/100
+        worst=max(worst,error)
+        assert error<=(3 if hz>200000 else 1)
+        assert s.state==(3 if duty==0 else 4 if duty==10000 else 2)
+    return {'frequency_hz':hz,'duty_cases':10000//step+1,'max_calculated_duty_error_points':worst}
+
 def spwm_checks(fw):
     stream=0x40026028
     assert not fw.spwm().initialized and fw.spwm().last_result==NOT_INIT
@@ -356,22 +410,187 @@ def spwm_checks(fw):
     assert fw.active[TIM2][0x40]==expected[0]  # Restarts at sample 0.
     assert fw.call('Spwm_Stop')==OK
     assert fw.active[TIM2][0x40]==0 and fw.read(TIM2+0x0c)==0 and not fw.read(stream)&1
+    # A stream may take bus cycles to clear EN. Stop must never spin for it.
+    assert fw.call('Spwm_Start')==OK
+    fw.forced_reads[stream]=fw.read(stream)|1
+    assert fw.call('Spwm_Stop')==PENDING
+    assert not fw.spwm().running and fw.active[TIM2][0x40]==0
+    assert fw.call('Spwm_Start')==BUSY
+    del fw.forced_reads[stream]
+    fw.write(stream,fw.read(stream)&~1)
+    fw.call('Wave_Process',fw.now)
+    assert fw.spwm().last_result==OK
     for ch in (0,1): fw.call('Wave_SetEnabled',ch,0,False,0)
     return {'dma_pipeline_samples':len(observed),'three_table_wraps':'PASS',
             'channel_request_memory_and_priority':'PASS','fault_stop_restart':'PASS',
             'analogue_filter_and_bus_load':'NOT TESTED'}
 
+def sweep_interface_checks():
+    restored=0
+    for enabled in (False,True):
+        for duty in (0,5000,10000):
+            for outcome in ('normal','point_fail','cancel_pending'):
+                f=Firmware()
+                assert f.call('Wave_Init')==OK
+                assert f.call('Wave_SetMode',1)==OK
+                assert f.apply(0,1234,duty)==OK
+                if enabled: assert f.call('Wave_SetEnabled',0,0,True,0)==OK
+                original=f.snapshot()
+                assert f.apply(1,500000,5000)==OK
+                assert f.call('Wave_SetEnabled',1,0,True,0)==OK
+                f.write(0xE000ED88,0xf00000)
+                assert f.call('Spwm_Init')==OK and f.call('Spwm_Start')==OK
+                assert f.call('Wave_AcquireA',1)==OK
+                assert f.call('Wave_AcquireA',1)==BUSY
+                assert f.apply(0,42,5000)==BUSY
+                assert f.call('Wave_SetEnabled',0,0,False,0)==BUSY
+                assert f.call('Wave_SetMode',0)==BUSY
+                assert f.call('Wave_SetSync',True)==BUSY
+                assert f.call('Wave_SetEnabled',0,1,True,0)==OK
+                assert f.apply(0,200000,5000,owner=1)==PENDING
+                id=f.snapshot().request_id
+                assert f.call('Wave_ReleaseA',1)==BUSY
+                assert f.apply(0,10,5000,owner=1)==BUSY
+                assert f.apply(1,400000,5000)==PENDING
+                f.update(1)
+                if outcome=='cancel_pending':
+                    assert f.call('Wave_SetEnabled',0,1,False,0)==OK
+                    assert f.snapshot().cancelled_id==id
+                else:
+                    f.update(0)
+                    assert f.snapshot().applied_id==id
+                # This is a test-only client of the frozen API, not another sweep
+                # controller. Never release ownership merely on accepted restore.
+                result=f.apply(0,original.applied.frequency_hz,original.applied.duty_bp,owner=1)
+                assert result in (OK,PENDING)
+                restore_id=f.snapshot().request_id
+                if result==PENDING:
+                    assert f.call('Wave_ReleaseA',1)==BUSY
+                    f.update(0)
+                assert f.snapshot().applied_id==restore_id
+                assert f.call('Wave_SetEnabled',0,1,enabled,0)==OK
+                s=f.snapshot()
+                assert (s.enabled,s.applied.frequency_hz,s.applied.duty_bp,s.state)==(
+                    original.enabled,original.applied.frequency_hz,original.applied.duty_bp,original.state)
+                assert s.owner==1 and not s.pending
+                assert f.call('Wave_ReleaseA',1)==OK and f.snapshot().owner==0
+                assert f.snapshot(1).enabled and f.snapshot(1).applied.frequency_hz==400000
+                assert f.spwm().running
+                restored+=1
+    return {'saved_state_and_outcome_combinations':restored,'restoration_and_ownership':'PASS',
+            'other_pwm_and_spwm_independence':'PASS','real_input_sweep':'NOT IN THIS BRANCH'}
+
+def fault_and_cancel_checks():
+    failed=Firmware()
+    failed.write(0x40023808,0)  # Wrong APB divider: no false initialization success.
+    assert failed.call('Wave_Init')==8
+    assert failed.snapshot().state==0 and failed.snapshot().last_result==8
+    f=Firmware()
+    f.call('Wave_Init')
+    for ch in (0,1): f.call('Wave_SetEnabled',ch,0,True,0)
+    # Fault on A must not stop independent B or release SELFTEST ownership.
+    assert f.call('Wave_AcquireA',1)==OK
+    assert f.apply(0,10,5000,owner=1)==PENDING
+    cancelled=f.snapshot().request_id
+    f.write(TIM1,f.read(TIM1)&~1)
+    f.call('Wave_Process',f.now)
+    s=f.snapshot()
+    assert s.state==5 and s.last_result==8 and s.cancelled_id==cancelled and s.owner==1
+    assert f.snapshot(1).enabled
+    assert f.apply(0,1000,5000,owner=1)==8
+    assert f.call('Wave_SetEnabled',0,1,True,0)==8
+    assert f.call('Wave_SetEnabled',0,1,False,0)==OK  # Explicit clear/recover.
+    assert f.call('Wave_ReleaseA',1)==OK
+    f.call('Wave_SetEnabled',0,0,True,0)
+    # Cancel synchronization while a small-step phase update is staged.
+    for cancelled_phase in (5,355,0):
+        assert f.call('Wave_SetSync',True)==PENDING
+        f.settle_sync()
+        assert f.call('Wave_SetPhase',cancelled_phase) in (OK,PENDING)
+        f.call('Wave_Process',f.now)
+        assert f.call('Wave_SetSync',False)==PENDING
+        f.settle_sync()
+        assert f.sync().state==0 and not f.sync().phase_pending
+        assert f.read(TIM1)&1 and f.read(TIM8)&1
+    # Also cancel first join, without waiting for a retained phase trajectory.
+    assert f.call('Wave_SetSync',True)==PENDING
+    assert f.call('Wave_SetSync',False)==PENDING
+    f.settle_sync()
+    assert f.sync().state==0
+    # If one timer fails during sync, stop the pair and report the fault.
+    assert f.call('Wave_SetSync',True)==PENDING
+    f.settle_sync()
+    f.write(TIM8+0x44,0)  # MOE unexpectedly lost.
+    f.call('Wave_Process',f.now)
+    assert f.snapshot(0).state==f.snapshot(1).state==5
+    assert f.sync().state==0 and f.sync().last_result==8
+    assert f.active[TIM1][0x34]==f.active[TIM8][0x38]==0
+    # Request IDs wrap with 0 reserved; timestamp comparisons use subtraction.
+    f=Firmware()
+    f.call('Wave_Init')
+    base=f.syms['channels']
+    f.write(base+Snapshot.request_id.offset,0xfffffffe)
+    f.write(base+Snapshot.applied_id.offset,0xfffffffe)
+    f.now=0xfffffff0
+    assert f.apply(0,1000,5000)==OK and f.snapshot().request_id==0xffffffff
+    assert f.call('Wave_SetEnabled',0,0,True,0)==OK and f.snapshot().request_id==1
+    assert f.apply(0,200000,5000)==PENDING
+    f.now=3
+    f.update(0)
+    s=f.snapshot()
+    assert not s.pending and s.request_id==s.applied_id==2 and s.applied_ms==4
+    assert (s.applied_ms-s.accepted_ms)&0xffffffff==20
+    return {'cancel_inflight_phase_and_join':'PASS','timer_fault_and_explicit_recovery':'PASS',
+            'request_id_and_ms_wrap':'PASS'}
+
+def diagnostic_checks(enabled):
+    f=Firmware()
+    # These offsets are fixed uint32 fields at the front of the diagnostic.
+    diag=f.syms['g_wave_diag']
+    f.call('Wave_Init')
+    f.call('WaveTest_Process',1000)
+    assert f.read(diag)==0x57564431
+    assert bool(f.uc.mem_read(diag+12,1)[0])==enabled
+    if not enabled:
+        assert 'g_wave_test_command' not in f.syms
+        assert not f.snapshot().enabled
+        return {'disabled_mailbox_not_linked':'PASS'}
+    cmd=f.syms['g_wave_test_command']
+    # Explicit CASE command (operation 10), args first, sequence last.
+    f.write(cmd+4,10); f.write(cmd+12,0); f.write(cmd,1)
+    for i in range(8): f.call('WaveTest_Process',1000+i)
+    assert f.read(diag+16)==1
+    assert f.snapshot().enabled and f.snapshot().applied.frequency_hz==1
+    # Next case is a running change; it must wait for true applied ID.
+    f.write(cmd+12,1); f.write(cmd,2)
+    f.call('WaveTest_Process',2000)
+    assert f.snapshot().pending and f.snapshot().applied.frequency_hz==1
+    f.update(0)
+    for i in range(4): f.call('WaveTest_Process',2001+i)
+    assert f.snapshot().applied.frequency_hz==200000 and f.read(diag+16)==2
+    return {'explicit_mailbox_case_and_pending_ack':'PASS'}
+
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--stage',default='W1')
+    parser.add_argument('--elf',type=Path,default=ELF_PATH)
+    parser.add_argument('--diagnostics',action='store_true')
     args=parser.parse_args()
+    ELF_PATH=args.elf
     fw=Firmware()
     base_checks(fw)
     result={'stage':args.stage,'api':'PASS','math':math_checks(fw),'hardware':'NOT TESTED',
-            'elf_sha256':hashlib.sha256((ROOT/'build/Debug/lab2_f407.elf').read_bytes()).hexdigest()}
+            'elf_sha256':hashlib.sha256(ELF_PATH.read_bytes()).hexdigest()}
     if args.stage>='W2': result['dual']=dual_checks(fw)
     if args.stage>='W3': result['extended']=extended_checks(fw)
     if args.stage>='W4': result['spwm']=spwm_checks(fw)
+    if args.stage>='W5':
+        result['standard_duty_grid']=standard_duty_checks()
+        result['synchronized_duty_grids']=[sync_duty_checks(hz,step) for hz,step in ((1,100),(200000,100),(500000,500))]
+        result['sweep_client']=sweep_interface_checks()
+        result['fault_cancel']=fault_and_cancel_checks()
+        result['diagnostics']=diagnostic_checks(args.diagnostics)
     OUT.mkdir(parents=True,exist_ok=True)
-    (OUT/(args.stage+'.json')).write_text(json.dumps(result,indent=2),encoding='utf-8')
+    suffix='_diagnostics' if args.diagnostics else '_release' if 'Release' in str(ELF_PATH) else ''
+    (OUT/(args.stage+suffix+'.json')).write_text(json.dumps(result,indent=2),encoding='utf-8')
     print(json.dumps(result,indent=2))

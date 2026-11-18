@@ -57,6 +57,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Wave/wave_hw.c
     App/Wave/wave_math.c
     App/Wave/spwm.c
+    App/Wave/wave_diagnostics.c
 )
 
 # Add include paths
@@ -74,6 +75,11 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
+
+option(WAVE_ENABLE_DIAGNOSTICS "Enable explicit debugger Wave test commands" OFF)
+if(WAVE_ENABLE_DIAGNOSTICS)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE WAVE_DIAGNOSTIC_ENABLE=1)
+endif()
 
 # Keep the frozen API callable from a debugger before the real UI is integrated.
 foreach(api Wave_Init Wave_Process Wave_SetMode Wave_GetMode Wave_GetCapabilities

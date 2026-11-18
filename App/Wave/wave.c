@@ -2,6 +2,7 @@
 #include "wave_config.h"
 #include "wave_hw.h"
 #include "spwm_private.h"
+#include "wave_diagnostics.h"
 #include <string.h>
 
 typedef struct {
@@ -10,13 +11,16 @@ typedef struct {
 } Channel;
 static Channel channels[2];
 static bool initialized;
+static BizResult init_result = BIZ_NOT_INITIALIZED;
 static BizMode mode;
 static WaveSyncSnapshot sync_status;
 typedef enum { SYNC_IDLE, SYNC_PREPARE_B, SYNC_JOIN_A, SYNC_WAIT_JOIN,
                SYNC_PHASE_LATCH, SYNC_ZERO_LATCH, SYNC_WAIT_PHASE, SYNC_DETACH } SyncAction;
 static SyncAction sync_action;
+static bool sync_exit_requested;
 static WaveTiming sync_b_timing;
 static uint32_t phase_count, staged_phase_count;
+volatile WaveRuntimeStats g_wave_runtime;
 
 static uint32_t lock(void) { uint32_t p = __get_PRIMASK(); __disable_irq(); return p; }
 static void unlock(uint32_t p) { __set_PRIMASK(p); }
@@ -53,6 +57,7 @@ static void complete(Channel *c, uint32_t now)
 static void accept(Channel *c, uint32_t *id)
 {
     ++c->snapshot.request_id;
+    if (!c->snapshot.request_id) ++c->snapshot.request_id; /* 0 means no request yet. */
     c->snapshot.accepted_ms = HAL_GetTick();
     c->snapshot.pending = true;
     c->snapshot.last_result = BIZ_PENDING;
@@ -72,11 +77,59 @@ static WaveTiming synchronized_b(uint16_t duty)
         a->frequency_millihz, duty == 10000U ? 10000U :
         (uint16_t)((compare * WAVE_SYNC_B_SCALE * 10000U + a->counts / 2U) / a->counts)};
 }
+static void begin_sync_exit(void)
+{
+    sync_status.phase_pending = false;
+    sync_action = SYNC_DETACH;
+    (void)Wave_Calculate(WAVE_TIMER_HZ, channels[1].snapshot.applied.frequency_hz,
+        channels[1].snapshot.applied.duty_bp, &sync_b_timing);
+    WaveHW_Stage(WAVE_CHANNEL_B, &sync_b_timing);
+}
+static bool check_faults(void)
+{
+    bool bad[2] = {false, false};
+    bool any = false;
+    for (unsigned i = 0; i < 2; ++i) {
+        TIM_TypeDef *tim = WaveHW_Timer((WaveChannel)i);
+        bad[i] = channels[i].snapshot.enabled &&
+                 (!(tim->CR1 & TIM_CR1_CEN) || !(tim->BDTR & TIM_BDTR_MOE));
+        any = any || bad[i];
+    }
+    if (!any) return false;
+    const bool was_sync = sync_status.state != WAVE_SYNC_OFF;
+    for (unsigned i = 0; i < 2; ++i) {
+        if (!bad[i] && !was_sync) continue;
+        Channel *c = &channels[i];
+        WaveHW_Stop((WaveChannel)i);
+        if (c->snapshot.pending) c->snapshot.cancelled_id = c->snapshot.request_id;
+        c->snapshot.pending = false;
+        c->snapshot.requested = c->snapshot.applied;
+        c->snapshot.enabled = false;
+        c->snapshot.state = WAVE_FAULT;
+        c->snapshot.last_result = BIZ_HARDWARE_ERROR;
+        (void)Wave_Calculate(WAVE_TIMER_HZ, c->snapshot.applied.frequency_hz,
+            c->snapshot.applied.duty_bp, &c->active);
+        c->staged = c->active;
+        c->snapshot.calculated_frequency_millihz = c->active.frequency_millihz;
+        c->snapshot.calculated_duty_bp = c->active.duty_bp;
+    }
+    if (was_sync) {
+        TIM8->SMCR &= ~TIM_SMCR_SMS;
+        TIM8->CR1 |= TIM_CR1_URS;
+        sync_action = SYNC_IDLE;
+        sync_exit_requested = false;
+        sync_status.state = WAVE_SYNC_OFF;
+        sync_status.phase_pending = false;
+        sync_status.phase_applicable = false;
+        sync_status.last_result = BIZ_HARDWARE_ERROR;
+    }
+    return true;
+}
 BizResult Wave_Init(void)
 {
     if (initialized) return BIZ_OK; /* Page navigation must not reset running output. */
     const BizResult result = WaveHW_Init();
-    if (result != BIZ_OK) return result;
+    if (result != BIZ_OK) { init_result = result; return result; }
     mode = BIZ_MODE_STANDARD;
     memset(channels, 0, sizeof(channels));
     for (unsigned i = 0; i < 2; ++i) {
@@ -91,6 +144,7 @@ BizResult Wave_Init(void)
         c->snapshot.owner = WAVE_OWNER_MANUAL;
     }
     initialized = true;
+    init_result = BIZ_OK;
     return BIZ_OK;
 }
 void Wave_Process(uint32_t now_ms)
@@ -102,11 +156,12 @@ void Wave_Process(uint32_t now_ms)
     /* A main-loop fallback for delayed acknowledgement, never wave generation. */
     Wave_TIM1_UpdateIRQ();
     Wave_TIM8_UpdateIRQ();
+    if (check_faults()) { unlock(p); return; }
     sync_status.phase_applicable = phase_applicable();
     if ((sync_action == SYNC_WAIT_JOIN || sync_action == SYNC_WAIT_PHASE) && (TIM8->SR & TIM_SR_TIF)) {
         TIM8->SR = ~TIM_SR_TIF;
         phase_count = staged_phase_count;
-        if (sync_action == SYNC_WAIT_JOIN) sync_status.state = WAVE_SYNC_ON;
+        if (sync_action == SYNC_WAIT_JOIN && !sync_exit_requested) sync_status.state = WAVE_SYNC_ON;
         sync_action = SYNC_IDLE;
         const uint32_t target = (channels[0].active.counts * (sync_status.requested_phase_deg % 360U) + 180U) / 360U;
         if (phase_count == target) {
@@ -117,6 +172,7 @@ void Wave_Process(uint32_t now_ms)
         sync_status.calculated_phase_millideg =
             (uint32_t)(((uint64_t)phase_count * 360000U + channels[0].active.counts / 2U) / channels[0].active.counts);
     }
+    if (sync_exit_requested && sync_action == SYNC_IDLE) begin_sync_exit();
     if (sync_status.state == WAVE_SYNC_ON && sync_status.phase_pending && sync_action == SYNC_IDLE) {
         const uint32_t n = channels[0].active.counts;
         uint32_t next = (n * (sync_status.requested_phase_deg % 360U) + 180U) / 360U;
@@ -172,6 +228,7 @@ BizResult Wave_Apply(WaveChannel ch, WaveOwner owner, const WaveParams *params, 
     if (!valid_channel(ch) || !valid_owner(owner)) return BIZ_INVALID_ARGUMENT;
     Channel *c = &channels[ch];
     if (c->snapshot.owner != owner || c->snapshot.pending) return BIZ_BUSY;
+    if (c->snapshot.state == WAVE_FAULT) return BIZ_HARDWARE_ERROR;
     if (sync_status.state == WAVE_SYNC_STARTING || sync_status.state == WAVE_SYNC_STOPPING || sync_status.phase_pending)
         return BIZ_BUSY;
     BizResult result = validate(params, mode);
@@ -202,6 +259,7 @@ BizResult Wave_SetEnabled(WaveChannel ch, WaveOwner owner, bool enabled, uint32_
     if (!valid_channel(ch) || !valid_owner(owner)) return BIZ_INVALID_ARGUMENT;
     Channel *c = &channels[ch];
     if (c->snapshot.owner != owner || (enabled && c->snapshot.pending)) return BIZ_BUSY;
+    if (enabled && c->snapshot.state == WAVE_FAULT) return BIZ_HARDWARE_ERROR;
     if (sync_status.state != WAVE_SYNC_OFF) return BIZ_BUSY;
     const uint32_t p = lock();
     if (!enabled) {
@@ -211,7 +269,7 @@ BizResult Wave_SetEnabled(WaveChannel ch, WaveOwner owner, bool enabled, uint32_
         if (ch == WAVE_CHANNEL_A) Wave_TIM1_UpdateIRQ();
         else Wave_TIM8_UpdateIRQ();
     }
-    if (!c->snapshot.pending && c->snapshot.enabled == enabled) {
+    if (!c->snapshot.pending && c->snapshot.enabled == enabled && c->snapshot.state != WAVE_FAULT) {
         WaveHW_Timer(ch)->CR1 &= ~TIM_CR1_UDIS;
         if (id) *id = c->snapshot.applied_id;
         unlock(p);
@@ -239,7 +297,7 @@ void Wave_GetSnapshot(WaveChannel ch, WaveSnapshot *out)
     const uint32_t p = lock();
     *out = (WaveSnapshot){0};
     out->state = WAVE_UNINITIALIZED;
-    out->last_result = BIZ_NOT_INITIALIZED;
+    out->last_result = init_result;
     if (initialized && valid_channel(ch)) *out = channels[ch].snapshot;
     unlock(p);
 }
@@ -265,15 +323,30 @@ BizResult Wave_SetSync(bool enabled)
 {
     if (!initialized) return BIZ_NOT_INITIALIZED;
     if (channels[0].snapshot.owner != WAVE_OWNER_MANUAL || channels[0].snapshot.pending ||
-        channels[1].snapshot.pending || sync_status.phase_pending ||
+        channels[1].snapshot.pending) return BIZ_BUSY;
+    if (!enabled) {
+        if (sync_status.state == WAVE_SYNC_OFF) return BIZ_OK;
+        if (sync_status.state == WAVE_SYNC_STOPPING) return BIZ_PENDING;
+        const uint32_t p = lock();
+        sync_exit_requested = true;
+        sync_status.state = WAVE_SYNC_STOPPING;
+        sync_status.last_result = BIZ_PENDING;
+        /* Finish at most the staged reference transfer/trigger, not every
+         * remaining small phase step. Then detach on a real B reset. */
+        if (sync_action == SYNC_IDLE) begin_sync_exit();
+        unlock(p);
+        return BIZ_PENDING;
+    }
+    if (sync_status.phase_pending ||
         sync_status.state == WAVE_SYNC_STARTING || sync_status.state == WAVE_SYNC_STOPPING) return BIZ_BUSY;
-    if ((enabled && sync_status.state == WAVE_SYNC_ON) || (!enabled && sync_status.state == WAVE_SYNC_OFF)) return BIZ_OK;
+    if (sync_status.state == WAVE_SYNC_ON) return BIZ_OK;
     if (enabled && (!channels[0].snapshot.enabled || !channels[1].snapshot.enabled ||
         channels[0].snapshot.applied.frequency_hz != channels[1].snapshot.applied.frequency_hz ||
         channels[0].snapshot.state != WAVE_PWM || channels[1].snapshot.state != WAVE_PWM)) return BIZ_INVALID_ARGUMENT;
     const uint32_t p = lock();
     if (enabled) {
         sync_status.state = WAVE_SYNC_STARTING;
+        sync_exit_requested = false;
         sync_status.phase_pending = true;
         sync_action = SYNC_PREPARE_B;
         sync_b_timing = synchronized_b(channels[1].snapshot.applied.duty_bp);
@@ -281,13 +354,6 @@ BizResult Wave_SetSync(bool enabled)
          * transition cycle. Join only AFTER the following A UEV, so the
          * first reset cannot cut that B high or create a short low. */
         MODIFY_REG(TIM1->CR2, TIM_CR2_MMS, TIM_CR2_MMS_1);
-        WaveHW_Stage(WAVE_CHANNEL_B, &sync_b_timing);
-    } else {
-        sync_status.state = WAVE_SYNC_STOPPING;
-        sync_action = SYNC_DETACH;
-        (void)Wave_Calculate(WAVE_TIMER_HZ, channels[1].snapshot.applied.frequency_hz,
-            channels[1].snapshot.applied.duty_bp, &sync_b_timing);
-        /* Last reset atomically restores B's independent timing; then detach. */
         WaveHW_Stage(WAVE_CHANNEL_B, &sync_b_timing);
     }
     sync_status.last_result = BIZ_PENDING;
@@ -327,6 +393,8 @@ void Wave_GetSyncSnapshot(WaveSyncSnapshot *out)
 void Wave_TIM1_UpdateIRQ(void)
 {
     if ((TIM1->DIER & TIM_DIER_UIE) && (TIM1->SR & TIM_SR_UIF)) {
+        const uint32_t started = DWT->CYCCNT;
+        ++g_wave_runtime.a_updates;
         TIM1->DIER &= ~TIM_DIER_UIE;
         TIM1->SR = ~TIM_SR_UIF;
         if (initialized && channels[0].snapshot.pending) complete(&channels[0], HAL_GetTick());
@@ -342,11 +410,15 @@ void Wave_TIM1_UpdateIRQ(void)
                 MODIFY_REG(TIM1->CR2, TIM_CR2_MMS, TIM_CR2_MMS_1);
             sync_action = SYNC_WAIT_PHASE;
         }
+        const uint32_t elapsed = DWT->CYCCNT - started;
+        if (elapsed > g_wave_runtime.a_max_cycles) g_wave_runtime.a_max_cycles = elapsed;
     }
 }
 void Wave_TIM8_UpdateIRQ(void)
 {
     if ((TIM8->DIER & TIM_DIER_UIE) && (TIM8->SR & TIM_SR_UIF)) {
+        const uint32_t started = DWT->CYCCNT;
+        ++g_wave_runtime.b_updates;
         TIM8->DIER &= ~TIM_DIER_UIE;
         TIM8->SR = ~TIM_SR_UIF;
         if (initialized && channels[1].snapshot.pending) complete(&channels[1], HAL_GetTick());
@@ -366,6 +438,9 @@ void Wave_TIM8_UpdateIRQ(void)
             sync_status.phase_applicable = false;
             sync_status.last_result = BIZ_OK;
             sync_action = SYNC_IDLE;
+            sync_exit_requested = false;
         }
+        const uint32_t elapsed = DWT->CYCCNT - started;
+        if (elapsed > g_wave_runtime.b_max_cycles) g_wave_runtime.b_max_cycles = elapsed;
     }
 }

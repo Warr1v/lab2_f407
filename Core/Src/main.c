@@ -25,6 +25,7 @@
 /* USER CODE BEGIN Includes */
 #include "screen_app.h"
 #include "business_api.h"
+#include "wave_diagnostics.h"
 
 /* USER CODE END Includes */
 
@@ -105,6 +106,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Wave_Process(HAL_GetTick());
+    WaveTest_Process(HAL_GetTick());
     ScreenApp_Process(HAL_GetTick());
   }
   /* USER CODE END 3 */

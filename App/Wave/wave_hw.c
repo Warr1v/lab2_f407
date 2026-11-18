@@ -33,6 +33,7 @@ void WaveHW_Start(WaveChannel channel, const WaveTiming *timing)
     write_timing(channel, timing);
     tim->EGR = TIM_EGR_UG;
     tim->SR = 0;
+    tim->BDTR |= TIM_BDTR_MOE;
     tim->CR1 |= TIM_CR1_CEN;
 }
 

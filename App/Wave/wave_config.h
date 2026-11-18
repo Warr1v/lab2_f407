@@ -26,4 +26,14 @@
 #define WAVE_DIAGNOSTIC_ENABLE 0
 #endif
 
+_Static_assert(WAVE_MIN_HZ > 0U && WAVE_MIN_HZ <= WAVE_STANDARD_MAX_HZ &&
+               WAVE_STANDARD_MAX_HZ <= WAVE_EXTENDED_MAX_HZ, "Invalid Wave range");
+_Static_assert(WAVE_STANDARD_STEP_BP > 0U && WAVE_EXTENDED_STEP_BP > 0U &&
+               WAVE_MAX_DUTY_BP <= 10000U && WAVE_MAX_DUTY_BP % WAVE_STANDARD_STEP_BP == 0U &&
+               WAVE_MAX_DUTY_BP % WAVE_EXTENDED_STEP_BP == 0U, "Invalid duty step/endpoints");
+_Static_assert(WAVE_PHASE_STEP_DEG > 0U && 360U % WAVE_PHASE_STEP_DEG == 0U, "Invalid phase step");
+_Static_assert(WAVE_DEFAULT_HZ >= WAVE_MIN_HZ && WAVE_DEFAULT_HZ <= WAVE_STANDARD_MAX_HZ &&
+               WAVE_DEFAULT_DUTY_BP <= WAVE_MAX_DUTY_BP &&
+               WAVE_DEFAULT_DUTY_BP % WAVE_STANDARD_STEP_BP == 0U, "Invalid startup parameters");
+
 #endif
