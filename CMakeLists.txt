@@ -52,6 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Screen/screen_calibration.c
     App/Screen/screen_selftest.c
     App/Mock/screen_mock.c
+    App/Game/snake.c
 )
 
 # Add include paths
@@ -60,6 +61,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     BSP/Screen
     App/Screen
     App/Mock
+    App/Game
 )
 
 # Add project symbols (macros)

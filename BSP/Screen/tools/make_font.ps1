@@ -1,7 +1,8 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 $screenDir = Split-Path -Parent $PSScriptRoot
-$labels = '屏幕调试原始坐标有效无按下移动抬起取消校准长清除菜单功能波输出输入检测秒表模拟返回开启关闭运行暂停继续开始重置记圈段记录成功失败超时未完成请点十字第个松手重退出保存在内存频率占空比信号等待已位边缘中心颜色测试仅提示'
+$labels = '扩展贪吃蛇接待屏幕调试原始坐标有效无按下移动抬起取消校准长清除菜单功能波输出输入检测秒表模拟返回开启关闭运行暂停继续开始重置记圈段记录成功失败超时未完成请点十字第个松手重退出保存在内存频率占空比信号等待已位边缘中心颜色测试仅提示'
+$labels += '上左右自动就绪胜利'
 $glyphChars = @($labels.ToCharArray() | Sort-Object -Unique)
 $utf8 = [Text.UTF8Encoding]::new($false)
 $builder = [Text.StringBuilder]::new()
