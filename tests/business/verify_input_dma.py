@@ -4,6 +4,7 @@ No claims about electrical filtering, arbitration latency or physical accuracy.
 import json
 import struct
 from arm_firmware import Firmware, ROOT, UC_HOOK_MEM_WRITE
+from unicorn import UC_HOOK_MEM_READ
 
 DMA=0x40026000
 R=DMA+0x70  # Stream4
@@ -132,6 +133,71 @@ s=snap()
 assert s['state']==1 and s['hz_m']==500000000 and s['duty']==1012,s
 assert fw.call('Input_SetMode',0)==0
 assert snap()['state']==0
+
+# DMA advances during every suffix copy. Safe writes to subsequent slots must
+# not prevent publication; requiring unchanged cursors would starve here.
+restart()
+t=20000000
+edge(True,t)
+edge(False,t+210)
+edge(True,t+420)
+t+=840
+def moving_dma(uc,access,address,size,value,data):
+    global t
+    edge(True,t)
+    edge(False,t+210)
+    t+=420
+hook=fw.uc.hook_add(UC_HOOK_MEM_READ,moving_dma,begin=rbase,end=rbase+2047)
+process()
+fw.uc.hook_del(hook)
+assert snap()['state']==1 and snap()['hz_m']==200000000,snap()
+
+# Preserve an old suffix's time anchor even after the free-running counter wraps.
+restart()
+edge(True,1000)
+edge(False,42001000)
+edge(True,84001000)
+fw.now+=1000
+fw.call('InputPort_Service') # mailbox observes it; core has not published it
+fw.now+=52000
+fw.write(TIM+0x24,(84001000 + 52000*84000)&0xFFFFFFFF)
+process()
+assert snap()['state']==2,snap()
+
+restart()
+fw.write(R+4,513)
+assert snap()['state']==4
+process()
+assert snap()['state']==4
+
+# Public sequence and acquisition IDs wrap independently of timer/tick.
+restart()
+result_address=fw.syms['result']
+fw.write(result_address+fw.layouts['InputSnapshot']['sequence'][0],0xFFFFFFFF)
+edge(True,100000)
+edge(False,100210)
+edge(True,100420)
+process()
+assert snap()['state']==1 and snap()['seq']==0
+fw.write(result_address+fw.layouts['InputSnapshot']['acquisition_id'][0],0xFFFFFFFF)
+assert restart()==1
+
+# Error arriving after the first flag read: vectors must be masked while stopped
+# so a persistent late TE flag cannot starve the main-loop restart.
+restart()
+edge(True,200000)
+edge(False,200210)
+edge(True,200420)
+masked=[]
+def nvic_mask(uc,access,address,size,value,data): masked.append(value)
+mask_hook=fw.uc.hook_add(UC_HOOK_MEM_WRITE,nvic_mask,begin=0xE000E180,end=0xE000E183)
+def late_error(uc,access,address,size,value,data): fw.write(DMA+4,8)
+late_hook=fw.uc.hook_add(UC_HOOK_MEM_READ,late_error,begin=rbase,end=rbase+2047)
+process()
+fw.uc.hook_del(late_hook)
+fw.uc.hook_del(mask_hook)
+assert snap()['state']==4
+assert (1<<15) in masked and (1<<13) in masked,masked
 
 output={'production_input_and_dma_port':'PASS','mode':'modeled DMA registers',
         'cycles_streamed':13192,'dma_wraps':25,'electrical_hardware':'not tested'}

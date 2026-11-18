@@ -25,6 +25,9 @@
 /* USER CODE BEGIN Includes */
 #include "screen_app.h"
 #include "business_api.h"
+#if defined(LAB2_ENABLE_INPUT_DEBUG)
+#include "input_debug.h"
+#endif
 
 /* USER CODE END Includes */
 
@@ -94,10 +97,14 @@ int main(void)
   ScreenApp_Init();
 #if defined(LAB2_ENABLE_SWEEP)
   (void)Wave_Init();
+  (void)Spwm_Init();
 #endif
   (void)Input_Init(); /* failure remains queryable through Input_GetSnapshot */
 #if defined(LAB2_ENABLE_SWEEP)
   (void)Sweep_Init();
+#endif
+#if defined(LAB2_ENABLE_INPUT_DEBUG)
+  InputDebug_Init();
 #endif
 
   /* USER CODE END 2 */
@@ -115,6 +122,9 @@ int main(void)
     Input_Process(HAL_GetTick());
 #if defined(LAB2_ENABLE_SWEEP)
     Sweep_Process(HAL_GetTick());
+#endif
+#if defined(LAB2_ENABLE_INPUT_DEBUG)
+    InputDebug_Process();
 #endif
     ScreenApp_Process(HAL_GetTick());
   }

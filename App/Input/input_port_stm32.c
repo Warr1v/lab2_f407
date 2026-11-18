@@ -9,6 +9,9 @@ static InputEdges mailbox;
 static volatile uint32_t latched_faults;
 static bool running, rising_full, falling_full;
 static uint32_t expected_boundary;
+static InputPortDiagnostics diagnostics;
+_Static_assert(INPUT_DMA_LENGTH >= 2U * INPUT_EDGE_HISTORY &&
+               !(INPUT_DMA_LENGTH & (INPUT_DMA_LENGTH - 1U)), "DMA ring must be a power of two");
 
 #define R_FLAGS (DMA_HISR_FEIF4 | DMA_HISR_DMEIF4 | DMA_HISR_TEIF4 | DMA_HISR_HTIF4 | DMA_HISR_TCIF4)
 #define F_FLAGS (DMA_LISR_FEIF2 | DMA_LISR_DMEIF2 | DMA_LISR_TEIF2 | DMA_LISR_HTIF2 | DMA_LISR_TCIF2)
@@ -22,6 +25,11 @@ static void unlock(uint32_t p) { __set_PRIMASK(p); }
 
 void InputPort_Stop(void)
 {
+    /* A late DMA error can latch after flags were sampled. Mask these vectors
+     * until Restart clears ALL flags, so a stopped fault cannot IRQ-storm and
+     * starve the main-loop recovery. No other DMA stream is affected. */
+    NVIC_DisableIRQ(DMA1_Stream4_IRQn);
+    NVIC_DisableIRQ(DMA1_Stream2_IRQn);
     TIM5->CCER &= ~CAPTURE_ENABLE;
     TIM5->DIER &= ~CAPTURE_REQUEST;
     DMA1_Stream4->CR &= ~DMA_SxCR_EN;
@@ -74,6 +82,8 @@ bool InputPort_Restart(void)
     TIM5->DIER = CAPTURE_REQUEST;
     running = true;
     TIM5->CCER |= CAPTURE_ENABLE; /* simultaneous arming; discard partial first cycle */
+    NVIC_EnableIRQ(DMA1_Stream4_IRQn);
+    NVIC_EnableIRQ(DMA1_Stream2_IRQn);
     unlock(p);
     return true;
 }
@@ -107,8 +117,6 @@ bool InputPort_Init(void)
     TIM5->CR1 = TIM_CR1_CEN;
     HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, INPUT_DMA_IRQ_PRIORITY, 0U);
     HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, INPUT_DMA_IRQ_PRIORITY, 0U);
-    HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
-    HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
     return true;
 }
 
@@ -119,6 +127,9 @@ uint32_t InputPort_Faults(void)
     uint32_t f = latched_faults;
     if (TIM5->SR & (TIM_SR_CC1OF | TIM_SR_CC2OF)) f |= INPUT_FAULT_OVERCAPTURE;
     if ((DMA1->HISR & R_ERRORS) || (DMA1->LISR & F_ERRORS)) f |= INPUT_FAULT_DMA;
+    if (running && (!(DMA1_Stream4->CR & DMA_SxCR_EN) || !(DMA1_Stream2->CR & DMA_SxCR_EN) ||
+        DMA1_Stream4->NDTR > INPUT_DMA_LENGTH || DMA1_Stream2->NDTR > INPUT_DMA_LENGTH))
+        f |= INPUT_FAULT_DMA;
     if ((DMA1->HISR & (DMA_HISR_HTIF4 | DMA_HISR_TCIF4)) ==
         (DMA_HISR_HTIF4 | DMA_HISR_TCIF4)) f |= INPUT_FAULT_OVERRUN;
     return f;
@@ -144,13 +155,14 @@ static void service_locked(void)
         InputPort_Stop();
         return;
     }
-    /* Copy only a small suffix, never a whole half buffer. DMA remains live
-     * while PRIMASK is set, so validate BOTH producer cursors afterwards. */
+    /* DMA keeps writing NEXT slots while we read PRECEDING slots. Validate
+     * that neither producer reached the suffix being copied, rather than
+     * requiring the two high-rate DMA cursors to stand still together. */
     for (unsigned retry = 0; retry < INPUT_CURSOR_RETRIES; ++retry) {
         uint32_t rn = DMA1_Stream4->NDTR, fn = DMA1_Stream2->NDTR;
         if (!rn || !fn || rn > INPUT_DMA_LENGTH || fn > INPUT_DMA_LENGTH) continue;
         uint32_t rp = INPUT_DMA_LENGTH - rn, fp = INPUT_DMA_LENGTH - fn;
-        InputEdges candidate;
+        InputEdges candidate = {0};
         candidate.rising_count = (uint8_t)(rising_full || rp >= INPUT_EDGE_HISTORY ? INPUT_EDGE_HISTORY : rp);
         candidate.falling_count = (uint8_t)(falling_full || fp >= INPUT_EDGE_HISTORY ? INPUT_EDGE_HISTORY : fp);
         __DMB();
@@ -161,16 +173,71 @@ static void service_locked(void)
         candidate.timer_now = TIM5->CNT;
         candidate.observed_ms = HAL_GetTick();
         __DMB();
-        if (rn != DMA1_Stream4->NDTR || fn != DMA1_Stream2->NDTR) continue;
+        uint32_t ra = DMA1_Stream4->NDTR, fa = DMA1_Stream2->NDTR;
+        if (!ra || !fa || ra > INPUT_DMA_LENGTH || fa > INPUT_DMA_LENGTH ||
+            (rn + INPUT_DMA_LENGTH - ra) % INPUT_DMA_LENGTH > INPUT_DMA_LENGTH - INPUT_EDGE_HISTORY ||
+            (fn + INPUT_DMA_LENGTH - fa) % INPUT_DMA_LENGTH > INPUT_DMA_LENGTH - INPUT_EDGE_HISTORY) {
+            ++diagnostics.cursor_retry_count;
+            continue;
+        }
         if (InputPort_Faults()) { latched_faults |= InputPort_Faults(); InputPort_Stop(); return; }
+        /* Preserve the time anchor of an unchanged suffix. Re-observing old
+         * CCR history after a full TIM5 wrap must not rejuvenate its age. */
+        if (candidate.rising_count == mailbox.rising_count &&
+            candidate.falling_count == mailbox.falling_count &&
+            (!candidate.rising_count || candidate.rising[0] == mailbox.rising[0]) &&
+            (!candidate.falling_count || candidate.falling[0] == mailbox.falling[0])) return;
         mailbox = candidate;
         return;
     }
     /* Cursor motion is not lost data: keep the preceding coherent mailbox,
      * retry at the next block IRQ or Process call, without inventing a fault. */
+    ++diagnostics.cursor_deferred_count;
 }
 
-void InputPort_Service(void) { uint32_t p = lock(); service_locked(); unlock(p); }
+static uint32_t cycle_now(void)
+{
+    return DWT->CYCCNT;
+}
+static void cycle_max(uint32_t start, uint32_t *maximum)
+{
+    if ((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) && (DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk)) {
+        uint32_t elapsed = cycle_now() - start;
+        if (elapsed > *maximum) *maximum = elapsed;
+        diagnostics.cycle_counter_available = true;
+    }
+}
+void InputPort_Service(void)
+{
+    uint32_t start = cycle_now();
+    uint32_t p = lock();
+    ++diagnostics.service_count;
+    service_locked();
+    cycle_max(start, &diagnostics.max_service_cycles);
+    unlock(p);
+}
 void InputPort_Read(InputEdges *out) { uint32_t p = lock(); *out = mailbox; unlock(p); }
-void Input_DMA1_Stream4_IRQHandler(void) { InputPort_Service(); }
-void Input_DMA1_Stream2_IRQHandler(void) { InputPort_Service(); }
+void Input_DMA1_Stream4_IRQHandler(void)
+{
+    uint32_t start = cycle_now();
+    ++diagnostics.rising_irq_count;
+    InputPort_Service();
+    cycle_max(start, &diagnostics.max_irq_cycles);
+}
+void Input_DMA1_Stream2_IRQHandler(void)
+{
+    uint32_t start = cycle_now();
+    ++diagnostics.falling_irq_count;
+    InputPort_Service();
+    cycle_max(start, &diagnostics.max_irq_cycles);
+}
+void InputPort_GetDiagnostics(InputPortDiagnostics *out)
+{
+    if (!out) return;
+    uint32_t p = lock();
+    *out = diagnostics;
+    out->rising_ndtr = DMA1_Stream4->NDTR;
+    out->falling_ndtr = DMA1_Stream2->NDTR;
+    out->latched_faults = InputPort_Faults();
+    unlock(p);
+}

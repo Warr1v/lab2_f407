@@ -37,5 +37,6 @@ def run(path):
 
 if __name__ == '__main__':
     results = [run(path) for path in sys.argv[1:]]
-    out = ROOT / 'build/business_test_results.json'
+    mode=Path(sys.argv[1]).parent.name if len(sys.argv)>1 else 'none'
+    out = ROOT / ('build/business_test_results_'+mode+'.json')
     out.write_text(json.dumps(results,indent=2), encoding='utf-8')

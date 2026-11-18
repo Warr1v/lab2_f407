@@ -141,7 +141,8 @@ void Input_Process(uint32_t now_ms)
     have_end = true;
     previous_end = end;
     uint32_t max_hz = result.mode == BIZ_MODE_EXTENDED ? INPUT_EXTENDED_MAX_HZ : INPUT_STANDARD_MAX_HZ;
-    uint32_t frequency = (uint32_t)(((uint64_t)INPUT_TIMER_HZ * 1000U + period / 2U) / period);
+    uint64_t frequency_wide = ((uint64_t)INPUT_TIMER_HZ * 1000U + period / 2U) / period;
+    uint32_t frequency = frequency_wide > UINT32_MAX ? UINT32_MAX : (uint32_t)frequency_wide;
     result.period_ticks = period;
     result.high_ticks = high;
     result.frequency_millihz = frequency;

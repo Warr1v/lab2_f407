@@ -48,6 +48,18 @@ Sweep_Process / ScreenApp_Process. SPWM remains independent. The input branch
 provides conditional main integration; no output initialization is executed in
 the default input-only image.
 
+## Fixed real-module software integration
+
+On 2026-11-18, `prepare_wave_integration.py` extracted the immutable Wave commit
+`8f300542703d8113984870726b86d1501683fb03` into an ignored build snapshot, with a
+per-file SHA256 manifest. No output source was edited or merged. The Integration
+ELF contains real Wave/Input/Sweep and no test doubles. `verify_real_sweep.py`
+passed ten points, disconnected-input failure, cancellation with restoration,
+manual-A rejection during ownership, and unchanged B/SPWM state. Captures are
+derived from active TIM1 PSC/ARR/CCR in a controlled ARM timer/DMA model. This is
+software evidence; physical signals and final coordinator acceptance remain
+pending. See `App/Input/software_validation.json` for results and image hashes.
+
 ## Acceptance still pending physical hardware
 
 With real output integrated and the coordinator's board slot, confirm safe

@@ -23,6 +23,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "input_port.h"
+#if defined(LAB2_ENABLE_SWEEP)
+#include "wave_hw.h"
+#include "spwm_private.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -202,5 +206,10 @@ void SysTick_Handler(void)
 /* USER CODE BEGIN 1 */
 void DMA1_Stream4_IRQHandler(void) { Input_DMA1_Stream4_IRQHandler(); }
 void DMA1_Stream2_IRQHandler(void) { Input_DMA1_Stream2_IRQHandler(); }
+#if defined(LAB2_ENABLE_SWEEP)
+void TIM1_UP_TIM10_IRQHandler(void) { Wave_TIM1_UpdateIRQ(); }
+void TIM8_UP_TIM13_IRQHandler(void) { Wave_TIM8_UpdateIRQ(); }
+void DMA1_Stream1_IRQHandler(void) { Spwm_DMA1_Stream1IRQ(); }
+#endif
 
 /* USER CODE END 1 */

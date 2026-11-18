@@ -93,6 +93,12 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
     -Wl,--undefined=Input_SetMode -Wl,--undefined=Input_GetMode
     -Wl,--undefined=Input_GetCapabilities)
 
+option(LAB2_ENABLE_INPUT_DEBUG "Enable debugger mailbox commands (no automatic output)" OFF)
+if(LAB2_ENABLE_INPUT_DEBUG)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/Input/input_debug.c)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE LAB2_ENABLE_INPUT_DEBUG=1)
+endif()
+
 option(LAB2_BUILD_BUSINESS_TESTS "Build isolated ARM logic tests with fake hardware" OFF)
 # Compile the real controller independently of Wave availability. An object
 # library is not linked to production until an explicit real Wave source list
@@ -113,6 +119,11 @@ if(LAB2_ENABLE_SWEEP)
     target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
         -Wl,--undefined=Sweep_Start -Wl,--undefined=Sweep_Cancel
         -Wl,--undefined=Sweep_GetSnapshot -Wl,--undefined=Sweep_GetDiagnostics)
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+        -Wl,--undefined=Spwm_Start -Wl,--undefined=Spwm_Stop
+        -Wl,--undefined=Spwm_GetSnapshot -Wl,--undefined=Wave_GetCapabilities
+        -Wl,--undefined=Wave_SetMode -Wl,--undefined=Wave_SetSync
+        -Wl,--undefined=Wave_SetPhase)
 endif()
 if(LAB2_BUILD_BUSINESS_TESTS)
     add_executable(input_logic_tests

@@ -80,6 +80,10 @@ int main(void)
     Input_Process(fake_now);
     Input_GetSnapshot(&s);
     CHECK(s.state == INPUT_OUT_OF_RANGE);
+    Fake_Period(timer+2000U,126000000U,63000000U,fake_now+1500U);
+    Input_Process(fake_now);
+    Input_GetSnapshot(&s);
+    CHECK(s.state == INPUT_OUT_OF_RANGE && s.frequency_millihz == 667U);
     CHECK(Input_SetMode(BIZ_MODE_EXTENDED) == BIZ_OK);
     Input_GetSnapshot(&s);
     CHECK(s.state == INPUT_WAITING && s.mode == BIZ_MODE_EXTENDED);

@@ -20,12 +20,16 @@ class Firmware:
                     self.uc.mem_write(segment['p_vaddr'],segment.data())
             self.syms={s.name:s['st_value'] for s in elf.get_section_by_name('.symtab').iter_symbols()}
             self.layouts={}
+            self.sizes={}
             for cu in elf.get_dwarf_info().iter_CUs():
                 for die in cu.iter_DIEs():
                     if die.tag!='DW_TAG_typedef' or 'DW_AT_name' not in die.attributes: continue
                     name=die.attributes['DW_AT_name'].value.decode()
-                    if name not in ('InputSnapshot','SweepSnapshot','InputEdges'): continue
+                    if name not in ('InputSnapshot','SweepSnapshot','SweepPoint','SweepDiagnostics',
+                                    'WaveSnapshot','SpwmSnapshot','InputEdges',
+                                    'InputDebugMailbox','InputPortDiagnostics'): continue
                     struct_die=die.get_DIE_from_attribute('DW_AT_type')
+                    self.sizes[name]=struct_die.attributes['DW_AT_byte_size'].value
                     fields={}
                     for field in struct_die.iter_children():
                         if 'DW_AT_data_member_location' not in field.attributes: continue

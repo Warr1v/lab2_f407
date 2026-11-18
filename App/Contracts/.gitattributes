@@ -1,0 +1,2 @@
+# Preserve the frozen template bytes even on a Windows autocrlf checkout.
+business_api.h -text

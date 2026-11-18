@@ -20,12 +20,16 @@ to `Input_DMA1_Stream4_IRQHandler` / `Input_DMA1_Stream2_IRQHandler`. Priority 4
 is reserved for both, above HAL tick priority 15; no per-edge interrupt is used.
 At 200 kHz the block IRQ rate is 781.25/s; at 500 kHz it is 1953.125/s.
 
-Both NDTR cursors are verified after copying the suffix (three attempts max).
+Both NDTR advances are checked after copying the suffix (three attempts max).
+DMA may continue writing subsequent slots; neither producer may reach a copied
+slot. It is unnecessary to freeze both producers within a 500 kHz half-period.
 No DMA samples are read as a coherent pair merely because two CCRs were read in
 sequence. Core selects adjacent rising timestamps and exactly one fall strictly
 inside that interval. Modular subtraction handles TIM5 wrap. Rise/fall transfer
 latency at the suffix boundary defers publication. A missing/extra edge,
 overcapture, DMA error or missed half/full boundary invalidates data and rearms.
+Stop masks only the two owned DMA vectors until Restart clears late flags and
+pending IRQs, preventing a late transfer-error IRQ from starving main recovery.
 
 Only the newest coherent suffix is retained, intentionally decimating complete
 cycles rather than queuing all measurements for UI. Main-loop stalls do not
