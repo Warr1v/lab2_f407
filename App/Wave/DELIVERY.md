@@ -24,3 +24,9 @@ First join waits for B's natural update, then a complete A boundary, and connect
 One-shot TIM1/TIM8 update IRQs also progress synchronization. No persistent period IRQ or global HAL callback. Raw handler forwarding must coexist with any future TIM10/TIM13 sharing. Neither timer is allocated by P1.
 
 2026-11-18: Debug 51356 B Flash / 3512 B RAM, Release 39804 B / 3512 B; no warnings. Actual ARM API tests pass dual independent operation, all 73 phase grid values forward/reverse, large advances/wraps, DC transitions and explicit sync exit. Maximum computed phase rounding in the 1000 Hz grid was 0.003 degrees. Hardware propagation delay, first join/exit and narrow-pulse behavior remain scope tests, not emulator results.
+
+## W3
+
+Standard remains 1..200000 Hz / 100 bp. Extended is 1..500000 Hz / 500 bp across its entire range. Both saved channel parameter sets are validated before mode changes. No clamping, rounding, pending overwrite, synchronization change or SELFTEST ownership bypass. Hardware timing calculation and CCR preload are the same proven 16-bit path; N=336 at 500 kHz.
+
+2026-11-18: Debug 51452 B Flash / 3512 B RAM; Release 39872 B / 3512 B, no warnings. 336 dual-channel 5% duty cases across eight representative frequencies, invalid mode/step/range/pending transitions, and the entire forward/reverse phase grid at 500 kHz passed real-ELF controlled-MMIO tests. Maximum computed phase rounding for that 500 kHz grid was 0.357 degrees. Silicon output, ITR propagation, actual scope errors and concurrent input/SPWM load are still unmeasured.

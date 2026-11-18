@@ -212,16 +212,16 @@ def math_checks(fw):
             'max_duty_error_points_sampled':worst_d,
             'analytic_bound':'N>=336 at 500kHz: rounding <=0.1491% frequency, <=0.14881 duty points. N<=65535 keeps CCR=N representable.'}
 
-def dual_checks(fw):
+def dual_checks(fw,hz=1000):
     fw.call('Wave_Init')
     # Asynchronous independent frequencies, explicit exit before individual changes.
-    assert fw.apply(0,1000,5000)==OK
+    assert fw.apply(0,hz,5000)==OK
     assert fw.apply(1,1753,2500)==OK
     for ch in (0,1): assert fw.call('Wave_SetEnabled',ch,0,True,0)==OK
     assert fw.call('Wave_SetSync',True)==INVALID
-    assert fw.apply(1,1000,2500)==PENDING
+    assert fw.apply(1,hz,2500)==PENDING
     fw.update(1)
-    assert fw.snapshot(0).applied.frequency_hz==fw.snapshot(1).applied.frequency_hz==1000
+    assert fw.snapshot(0).applied.frequency_hz==fw.snapshot(1).applied.frequency_hz==hz
     assert fw.call('Wave_SetSync',True)==PENDING
     assert fw.call('Wave_AcquireA',1)==BUSY
     fw.settle_sync()
@@ -247,7 +247,7 @@ def dual_checks(fw):
     assert fw.call('Wave_SetPhase',7)==STEP
     # DC endpoints stay legal while synchronization and the retained phase persist.
     for ch,duty in [(0,0),(0,10000),(0,5000),(1,0),(1,10000),(1,2500)]:
-        assert fw.apply(ch,1000,duty)==PENDING
+        assert fw.apply(ch,hz,duty)==PENDING
         if ch==0: fw.update(0)
         else: fw.trigger_b()
         s=fw.snapshot(ch)
@@ -262,8 +262,40 @@ def dual_checks(fw):
     fw.update(1)
     assert fw.snapshot(1).applied.frequency_hz==777
     for ch in (0,1): assert fw.call('Wave_SetEnabled',ch,0,False,0)==OK
-    return {'phase_grid_and_reverse':'PASS','max_phase_error_deg_1000hz':worst,
+    return {'phase_grid_and_reverse':'PASS','frequency_hz':hz,'max_phase_error_deg':worst,
             'dc_sync_entry_exit_and_independent':'PASS','physical_transitions':'NOT TESTED'}
+
+def extended_checks(fw):
+    assert fw.apply(0,1000,5100)==OK
+    assert fw.call('Wave_SetMode',1)==STEP
+    assert fw.call('Wave_GetMode')==0
+    assert fw.apply(0,1000,5000)==OK
+    assert fw.call('Wave_SetMode',1)==OK
+    assert fw.apply(1,500000,5000)==OK
+    assert fw.call('Wave_SetMode',0)==RANGE
+    assert fw.apply(1,500001,5000)==RANGE
+    assert fw.apply(1,1,100)==STEP  # Entire extended mode uses 5%, including 1Hz.
+    rows=[]
+    for hz in (1,199999,200000,250000,333333,400000,499258,500000):
+        for ch in (0,1):
+            for duty in range(0,10001,500):
+                assert fw.apply(ch,hz,duty)==OK
+                assert fw.call('Wave_SetEnabled',ch,0,True,0)==OK
+                s=fw.snapshot(ch)
+                rows.append((hz,ch,duty,s.frequency_millihz,s.duty_bp))
+                assert abs(s.frequency_millihz/(hz*1000)-1)<=.01
+                assert abs(s.duty_bp-duty)<=300
+                assert fw.call('Wave_SetEnabled',ch,0,False,0)==OK
+    # Mode cannot change while an actual preload is pending.
+    assert fw.apply(0,1000,5000)==OK
+    fw.call('Wave_SetEnabled',0,0,True,0)
+    assert fw.apply(0,12345,5000)==PENDING
+    assert fw.call('Wave_SetMode',0)==BUSY
+    fw.update()
+    fw.call('Wave_SetEnabled',0,0,False,0)
+    result=dual_checks(fw,500000)
+    result['dual_extended_duty_cases']=len(rows)
+    return result
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
@@ -274,6 +306,7 @@ if __name__=='__main__':
     result={'stage':args.stage,'api':'PASS','math':math_checks(fw),'hardware':'NOT TESTED',
             'elf_sha256':hashlib.sha256((ROOT/'build/Debug/lab2_f407.elf').read_bytes()).hexdigest()}
     if args.stage>='W2': result['dual']=dual_checks(fw)
+    if args.stage>='W3': result['extended']=extended_checks(fw)
     OUT.mkdir(parents=True,exist_ok=True)
     (OUT/(args.stage+'.json')).write_text(json.dumps(result,indent=2),encoding='utf-8')
     print(json.dumps(result,indent=2))

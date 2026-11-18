@@ -146,16 +146,21 @@ void Wave_GetCapabilities(WaveCapabilities *out)
     if (!out) return;
     *out = (WaveCapabilities){0};
     if (!initialized) return;
-    *out = (WaveCapabilities){WAVE_MIN_HZ, WAVE_STANDARD_MAX_HZ,
-        WAVE_MAX_DUTY_BP, WAVE_STANDARD_STEP_BP, WAVE_PHASE_STEP_DEG, true, true, false};
+    *out = (WaveCapabilities){WAVE_MIN_HZ,
+        mode == BIZ_MODE_STANDARD ? WAVE_STANDARD_MAX_HZ : WAVE_EXTENDED_MAX_HZ,
+        WAVE_MAX_DUTY_BP, mode == BIZ_MODE_STANDARD ? WAVE_STANDARD_STEP_BP : WAVE_EXTENDED_STEP_BP,
+        WAVE_PHASE_STEP_DEG, true, true, false};
 }
 BizResult Wave_SetMode(BizMode m)
 {
     if (!initialized) return BIZ_NOT_INITIALIZED;
     if (m != BIZ_MODE_STANDARD && m != BIZ_MODE_EXTENDED) return BIZ_INVALID_ARGUMENT;
-    if (m == BIZ_MODE_EXTENDED) return BIZ_UNSUPPORTED; /* W3 enables after validation. */
     if (channels[0].snapshot.pending || channels[1].snapshot.pending ||
         sync_status.state != WAVE_SYNC_OFF || channels[0].snapshot.owner != WAVE_OWNER_MANUAL) return BIZ_BUSY;
+    for (unsigned i = 0; i < 2; ++i) {
+        const BizResult result = validate(&channels[i].snapshot.applied, m);
+        if (result != BIZ_OK) return result;
+    }
     mode = m;
     return BIZ_OK;
 }
