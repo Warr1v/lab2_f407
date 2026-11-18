@@ -1,14 +1,22 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$env:PATH = 'D:/code/stm32cube/bundles/cmake/4.3.1+st.1/bin;D:/code/stm32cube/bundles/ninja/1.13.2+st.1/bin;D:/code/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin;D:/code/Python;' + $env:PATH
-$env:PYTHONPATH = (Join-Path $projectRoot 'build/test_python') + ';' + (Join-Path $projectRoot 'build/snake_checks/python')
+$pathSeparator = [IO.Path]::PathSeparator
+# Prefer tools already in PATH; add this workstation's optional installed bundles
+# only when present. A clone on another machine does not need these drive paths.
+$optionalToolDirs = @('D:/code/stm32cube/bundles/cmake/4.3.1+st.1/bin',
+    'D:/code/stm32cube/bundles/ninja/1.13.2+st.1/bin',
+    'D:/code/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin','D:/code/Python')
+$toolDirs = @($optionalToolDirs | Where-Object { Test-Path -LiteralPath $_ -PathType Container })
+if ($toolDirs.Count) { $env:PATH = ($toolDirs -join $pathSeparator) + $pathSeparator + $env:PATH }
+$env:PYTHONPATH = @((Join-Path $projectRoot 'build/test_python'),
+    (Join-Path $projectRoot 'build/snake_checks/python'),$env:PYTHONPATH) -join $pathSeparator
 function Invoke-Check([string]$Program, [string[]]$CommandArgs) {
     & $Program @CommandArgs
     if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
 }
 Push-Location -LiteralPath $projectRoot
 try {
-    & python -c 'import unicorn, elftools' 2>$null
+    & python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('unicorn') and importlib.util.find_spec('elftools') else 1)"
     if ($LASTEXITCODE -ne 0) {
         Invoke-Check python @('-m','pip','install','--target','build/test_python','unicorn==2.1.4','pyelftools==0.32')
     }
