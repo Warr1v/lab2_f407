@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "input_port.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -199,5 +200,7 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+void DMA1_Stream4_IRQHandler(void) { Input_DMA1_Stream4_IRQHandler(); }
+void DMA1_Stream2_IRQHandler(void) { Input_DMA1_Stream2_IRQHandler(); }
 
 /* USER CODE END 1 */

@@ -24,6 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "screen_app.h"
+#include "business_api.h"
 
 /* USER CODE END Includes */
 
@@ -91,6 +92,7 @@ int main(void)
   MX_FSMC_Init();
   /* USER CODE BEGIN 2 */
   ScreenApp_Init();
+  (void)Input_Init(); /* failure remains queryable through Input_GetSnapshot */
 
   /* USER CODE END 2 */
 
@@ -101,6 +103,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Input_Process(HAL_GetTick());
     ScreenApp_Process(HAL_GetTick());
   }
   /* USER CODE END 3 */
