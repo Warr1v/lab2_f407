@@ -67,3 +67,21 @@ narrow-pulse detection, 1 Hz worst-phase response <=2 s, interrupt duration and
 real UI/concurrent hardware tests are still required. Confirm offset, load and
 common ground, and disconnect PA8 loopback before an independent source drives
 PA1. Firmware is not flashed without the shared-board coordinator's time slot.
+
+## I2 extension
+
+Extended mode preserves the same 84 MHz clock and capture hardware and changes
+the capability to 500000 Hz. The ABI, snapshot precision and raw measured duty
+remain unchanged. Both direction mode switches discard old records via the same
+hardware fence; standard mode retains its original limit. Range classification
+allows a one-tick capture quantization interval to straddle a capability endpoint,
+without clamping the reported result or widening the advertised capability.
+
+At 500 kHz there are 168 timer ticks/period. One period-tick quantization is
+approximately 0.60% frequency uncertainty, within the 1% budget before clock and
+electrical errors. This analysis does not establish physical narrow-pulse capture
+or total accuracy. Two word transfers/cycle require 4 MB/s of DMA payload; at
+200 kHz it is 1.6 MB/s, excluding bus overhead. At 500 kHz the half-buffer service
+deadline is 512 microseconds. Measured IRQ duration and arbitration with FSMC/
+SPWM are pending physical tests. Short main pauses are handled by the block IRQ
+mailbox, but long interrupt masking is deliberately diagnosed as overrun.

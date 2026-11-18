@@ -152,7 +152,8 @@ void Input_Process(uint32_t now_ms)
         (age_ticks + period + INPUT_TIMER_HZ / 1000U - 1U) / (INPUT_TIMER_HZ / 1000U);
     result.published_ms = now_ms;
     ++result.sequence;
-    if (frequency < INPUT_MIN_HZ * 1000U || frequency > max_hz * 1000U)
+    if ((uint64_t)(period + INPUT_RANGE_QUANTIZATION_TICKS) * max_hz < INPUT_TIMER_HZ ||
+        (uint64_t)(period - (period > INPUT_RANGE_QUANTIZATION_TICKS ? INPUT_RANGE_QUANTIZATION_TICKS : 0U)) * INPUT_MIN_HZ > INPUT_TIMER_HZ)
         invalidate(INPUT_OUT_OF_RANGE, BIZ_OUT_OF_RANGE);
     else invalidate(INPUT_VALID, BIZ_OK);
 }

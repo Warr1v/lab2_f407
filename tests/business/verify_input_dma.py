@@ -117,7 +117,23 @@ assert snap()['state']==4
 process()
 assert snap()['overrun']==2
 
+assert fw.call('Input_SetMode',1)==0
+assert snap()['state']==0
+rc=fc=0
+t=10000000
+for i in range(8192):
+    edge(True,t)
+    if fw.read(DMA+4)&0x30: fw.call('Input_DMA1_Stream4_IRQHandler')
+    edge(False,t+17) # ~10.119%, not an output setting step
+    t+=168
+fw.now+=17
+process()
+s=snap()
+assert s['state']==1 and s['hz_m']==500000000 and s['duty']==1012,s
+assert fw.call('Input_SetMode',0)==0
+assert snap()['state']==0
+
 output={'production_input_and_dma_port':'PASS','mode':'modeled DMA registers',
-        'cycles_streamed':5000,'dma_wraps':9,'electrical_hardware':'not tested'}
+        'cycles_streamed':13192,'dma_wraps':25,'electrical_hardware':'not tested'}
 (ROOT/'build/input_dma_results.json').write_text(json.dumps(output,indent=2))
 print(json.dumps(output))

@@ -11,5 +11,7 @@
 #define INPUT_DMA_IRQ_PRIORITY 4U
 #define INPUT_EDGE_HISTORY 4U
 #define INPUT_CURSOR_RETRIES 3U
+/* Classify quantized endpoint intervals without clamping measurements. */
+#define INPUT_RANGE_QUANTIZATION_TICKS 1U
 
 #endif
