@@ -66,6 +66,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Game
     App/Contracts
     App/Input
+    App/SelfTest
 )
 
 # Add project symbols (macros)
@@ -93,10 +94,43 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
     -Wl,--undefined=Input_GetCapabilities)
 
 option(LAB2_BUILD_BUSINESS_TESTS "Build isolated ARM logic tests with fake hardware" OFF)
+# Compile the real controller independently of Wave availability. An object
+# library is not linked to production until an explicit real Wave source list
+# is provided by the coordinator. No placeholder Wave function is supplied.
+add_library(sweep_controller OBJECT App/SelfTest/sweep.c)
+target_include_directories(sweep_controller PRIVATE App/Contracts App/SelfTest)
+option(LAB2_ENABLE_SWEEP "Link real sweep with an explicitly integrated Wave implementation" OFF)
+set(LAB2_WAVE_SOURCES "" CACHE STRING "Reviewed real Wave source paths, never test doubles")
+set(LAB2_WAVE_INCLUDE_DIRS "" CACHE STRING "Reviewed real Wave include paths")
+if(LAB2_ENABLE_SWEEP)
+    if(NOT LAB2_WAVE_SOURCES)
+        message(FATAL_ERROR "LAB2_ENABLE_SWEEP requires reviewed real LAB2_WAVE_SOURCES")
+    endif()
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE $<TARGET_OBJECTS:sweep_controller>
+        App/SelfTest/sweep_port_stm32.c ${LAB2_WAVE_SOURCES})
+    target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${LAB2_WAVE_INCLUDE_DIRS})
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE LAB2_ENABLE_SWEEP=1)
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+        -Wl,--undefined=Sweep_Start -Wl,--undefined=Sweep_Cancel
+        -Wl,--undefined=Sweep_GetSnapshot -Wl,--undefined=Sweep_GetDiagnostics)
+endif()
 if(LAB2_BUILD_BUSINESS_TESTS)
     add_executable(input_logic_tests
         tests/business/test_input.c tests/business/fake_input_port.c App/Input/input.c)
     target_include_directories(input_logic_tests PRIVATE App/Contracts App/Input tests/business)
     target_link_options(input_logic_tests PRIVATE -nostartfiles -Wl,-e,main
         -Wl,-Map=input_logic_tests.map)
+    add_executable(sweep_logic_tests tests/business/test_sweep.c
+        tests/business/fake_sweep_business.c App/SelfTest/sweep.c)
+    target_include_directories(sweep_logic_tests PRIVATE App/Contracts App/SelfTest tests/business)
+    target_link_options(sweep_logic_tests PRIVATE -nostartfiles -Wl,-e,main
+        -Wl,-Map=sweep_logic_tests.map)
+    foreach(scenario RANGE 1 6)
+        add_executable(sweep_fault_${scenario} tests/business/test_sweep_faults.c
+            tests/business/fake_sweep_business.c App/SelfTest/sweep.c)
+        target_include_directories(sweep_fault_${scenario} PRIVATE App/Contracts App/SelfTest tests/business)
+        target_compile_definitions(sweep_fault_${scenario} PRIVATE SCENARIO=${scenario})
+        target_link_options(sweep_fault_${scenario} PRIVATE -nostartfiles -Wl,-e,main
+            -Wl,-Map=sweep_fault_${scenario}.map)
+    endforeach()
 endif()

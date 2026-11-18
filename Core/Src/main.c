@@ -92,7 +92,13 @@ int main(void)
   MX_FSMC_Init();
   /* USER CODE BEGIN 2 */
   ScreenApp_Init();
+#if defined(LAB2_ENABLE_SWEEP)
+  (void)Wave_Init();
+#endif
   (void)Input_Init(); /* failure remains queryable through Input_GetSnapshot */
+#if defined(LAB2_ENABLE_SWEEP)
+  (void)Sweep_Init();
+#endif
 
   /* USER CODE END 2 */
 
@@ -103,7 +109,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if defined(LAB2_ENABLE_SWEEP)
+    Wave_Process(HAL_GetTick());
+#endif
     Input_Process(HAL_GetTick());
+#if defined(LAB2_ENABLE_SWEEP)
+    Sweep_Process(HAL_GetTick());
+#endif
     ScreenApp_Process(HAL_GetTick());
   }
   /* USER CODE END 3 */
