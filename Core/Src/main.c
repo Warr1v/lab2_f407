@@ -24,6 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "screen_app.h"
+#include "business_api.h"
 
 /* USER CODE END Includes */
 
@@ -90,6 +91,7 @@ int main(void)
   MX_GPIO_Init();
   MX_FSMC_Init();
   /* USER CODE BEGIN 2 */
+  (void)Wave_Init();
   ScreenApp_Init();
 
   /* USER CODE END 2 */
@@ -101,6 +103,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Wave_Process(HAL_GetTick());
     ScreenApp_Process(HAL_GetTick());
   }
   /* USER CODE END 3 */

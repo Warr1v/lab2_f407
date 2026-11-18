@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "wave_hw.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -199,5 +200,7 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+void TIM1_UP_TIM10_IRQHandler(void) { Wave_TIM1_UpdateIRQ(); }
+void TIM8_UP_TIM13_IRQHandler(void) { Wave_TIM8_UpdateIRQ(); }
 
 /* USER CODE END 1 */

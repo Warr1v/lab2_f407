@@ -53,6 +53,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Screen/screen_selftest.c
     App/Mock/screen_mock.c
     App/Game/snake.c
+    App/Wave/wave.c
+    App/Wave/wave_hw.c
+    App/Wave/wave_math.c
 )
 
 # Add include paths
@@ -62,12 +65,21 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Screen
     App/Mock
     App/Game
+    App/Contracts
+    App/Wave
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
+
+# Keep the frozen API callable from a debugger before the real UI is integrated.
+foreach(api Wave_Init Wave_Process Wave_SetMode Wave_GetMode Wave_GetCapabilities
+    Wave_Apply Wave_SetEnabled Wave_GetSnapshot Wave_SetSync Wave_SetPhase
+    Wave_GetSyncSnapshot Wave_AcquireA Wave_ReleaseA Wave_Calculate)
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,--undefined=${api}")
+endforeach()
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
