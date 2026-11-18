@@ -4,8 +4,7 @@
 #include <stdint.h>
 void ScreenApp_Init(void);
 void ScreenApp_Process(uint32_t now_ms);
-/* UI option only; no business expansion driver is connected yet.
- * Main-loop context. Defaults to false after reset; retained across pages. */
+/* Wave/Input mode coordinated by the UI; main-loop access only. */
 bool ScreenApp_ExtensionsEnabled(void);
 /* Inspectable through SWD; real screen/touch validation is performed by the user. */
 typedef struct {
@@ -14,4 +13,12 @@ typedef struct {
     uint32_t selftest, max_scan_us, max_service_us;
 } ScreenDiagnostics;
 extern volatile ScreenDiagnostics g_screen_diag;
+typedef enum {
+    SCREEN_SLIDER_IDLE, SCREEN_SLIDER_PRESSED, SCREEN_SLIDER_DRAGGING,
+    SCREEN_SLIDER_RELEASED, SCREEN_SLIDER_CANCELLED
+} ScreenSliderPhase;
+typedef struct {
+    uint32_t phase, value_bp, presses, moves, releases, cancellations;
+} ScreenSliderDiagnostics;
+extern volatile ScreenSliderDiagnostics g_screen_slider_diag;
 #endif

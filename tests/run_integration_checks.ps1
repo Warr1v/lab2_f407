@@ -30,6 +30,7 @@ try {
     Invoke-Check python @('tests/business/verify_input_dma.py')
     Invoke-Check python @('tests/business/verify_real_sweep.py')
     Invoke-Check python @('tests/verify_integrated_ui.py')
+    Invoke-Check python @('tests/verify_slider.py')
     Invoke-Check python @('tests/verify_snake.py')
     Invoke-Check python @('BSP/Screen/tools/verify_assets.py')
     Invoke-Check python @('tests/business/verify_delivery.py')

@@ -21,11 +21,12 @@ enum { ACT_MENU=1, ACT_PWM, ACT_INPUT, ACT_TIMER, ACT_EXTENSIONS, ACT_SNAKE,
        ACT_CHANNEL, ACT_FREQUENCY, ACT_DUTY, ACT_OUTPUT, ACT_MORE,
        ACT_SYNC, ACT_PHASE, ACT_SPWM, ACT_SWEEP, ACT_SWEEP_RUN,
        ACT_SWEEP_PAGE, ACT_REACQUIRE, ACT_BACK, ACT_CLEAR, ACT_DELETE,
-       ACT_CONFIRM, ACT_SLIDER, ACT_DIGIT=100 };
+       ACT_CONFIRM, ACT_DIGIT=100 };
 enum { BG=0xFFFF, FG=0x1082, ACCENT=0x051F, PALE=0xE73C, PRESSED=0xBDF7, ALERT=0xF800 };
 typedef struct { int16_t x,y,w,h; const char *label; uint8_t action; bool enabled; } Button;
 
 volatile ScreenDiagnostics g_screen_diag = {.magic=0x53435231}; /* SCR1 */
+volatile ScreenSliderDiagnostics g_screen_slider_diag;
 static ScreenCalibration calibration;
 static bool extensions_enabled;
 static ScreenMock mock;
@@ -48,6 +49,15 @@ static unsigned edit_kind;
 static uint8_t edit_parent;
 static char edit_value[8];
 static bool edit_replace;
+/* One latest-value queue per channel: never enqueue a backlog of finger positions. */
+typedef struct { bool valid; uint16_t duty_bp; uint32_t request_id; } DutyTarget;
+static DutyTarget duty_targets[2];
+static bool slider_active;
+static int16_t slider_down_x;
+static uint16_t slider_value_bp;
+static uint32_t slider_painted = UINT32_MAX;
+enum { SLIDER_X=12, SLIDER_W=216, SLIDER_TRACK_X=18, SLIDER_SPAN=203,
+       SLIDER_PWM_Y=138, SLIDER_PWM_H=32, SLIDER_NUMBER_Y=98, SLIDER_NUMBER_H=20 };
 static void draw_page(void);
 static void navigate(uint8_t next);
 enum { SNAKE_X=8, SNAKE_Y=48, SNAKE_PIXELS=16, SNAKE_STEP_MS=180 };
@@ -189,6 +199,136 @@ static void format_frequency(char *s,size_t n,uint32_t millihz)
 {
     snprintf(s,n,"%lu.%03lu Hz",(unsigned long)(millihz/1000U),(unsigned long)(millihz%1000U));
 }
+static bool slider_visible(void)
+{
+    return page==PAGE_PWM || (page==PAGE_NUMBER && edit_kind==EDIT_DUTY);
+}
+static int slider_y(void) { return page==PAGE_PWM?SLIDER_PWM_Y:SLIDER_NUMBER_Y; }
+static int slider_height(void) { return page==PAGE_PWM?SLIDER_PWM_H:SLIDER_NUMBER_H; }
+static bool slider_hit(int x,int y)
+{
+    return slider_visible() && x>=SLIDER_X && x<SLIDER_X+SLIDER_W &&
+        y>=slider_y() && y<slider_y()+slider_height();
+}
+static bool slider_editable(void)
+{
+    if(page==PAGE_NUMBER) return edit_kind==EDIT_DUTY;
+    WaveSnapshot w;WaveSyncSnapshot sync;
+    Wave_GetSnapshot(channel,&w);Wave_GetSyncSnapshot(&sync);
+    return w.owner==WAVE_OWNER_MANUAL && w.state!=WAVE_UNINITIALIZED && w.state!=WAVE_FAULT &&
+        (!w.pending || (duty_targets[channel].valid && duty_targets[channel].request_id==w.request_id)) &&
+        !sync.phase_pending && (sync.state==WAVE_SYNC_OFF || sync.state==WAVE_SYNC_ON);
+}
+static uint16_t slider_display_value(void)
+{
+    if(slider_active) return slider_value_bp;
+    if(page==PAGE_NUMBER) {
+        unsigned long value=strtoul(edit_value,NULL,10);
+        return value>100U?10000U:(uint16_t)(value*100U);
+    }
+    if(duty_targets[channel].valid) return duty_targets[channel].duty_bp;
+    WaveSnapshot w;Wave_GetSnapshot(channel,&w);
+    return w.pending?w.requested.duty_bp:w.applied.duty_bp;
+}
+static void draw_slider(void)
+{
+    if(!slider_visible()) return;
+    const bool enabled=slider_editable();
+    const uint16_t value=slider_display_value();
+    const uint32_t signature=value | (slider_active?0x10000U:0) | (enabled?0x20000U:0);
+    if(signature==slider_painted) return;
+    const int y=slider_y(), h=slider_height(), middle=y+h/2;
+    const int knob=SLIDER_TRACK_X+(int)(((uint32_t)value*SLIDER_SPAN+5000U)/10000U);
+    /* Erase only the old thumb outside the track. Never blank the entire bar
+     * between touch frames, and never run generic button highlighting here. */
+    if(slider_painted!=UINT32_MAX) {
+        const int old_knob=SLIDER_TRACK_X+(int)(((slider_painted&0xffffU)*SLIDER_SPAN+5000U)/10000U);
+        fill(old_knob-5,middle-8,11,5,BG);
+        fill(old_knob-5,middle+3,11,5,BG);
+    }
+    slider_painted=signature;
+    fill(SLIDER_TRACK_X,middle-3,knob-SLIDER_TRACK_X,6,enabled?ACCENT:GRAY);
+    fill(knob,middle-3,SLIDER_TRACK_X+SLIDER_SPAN+1-knob,6,PALE);
+    fill(knob-5,middle-8,11,16,enabled?(slider_active?PRESSED:ACCENT):GRAY);
+    FRONT_COLOR=enabled?ACCENT:GRAY;
+    LCD_DrawRectangle((u16)(knob-5),(u16)(middle-8),(u16)(knob+5),(u16)(middle+7));
+}
+static void slider_update(int x,bool first)
+{
+    int position=x-SLIDER_TRACK_X;
+    if(position<0)position=0;
+    if(position>SLIDER_SPAN)position=SLIDER_SPAN;
+    const int step=Wave_GetMode()==BIZ_MODE_EXTENDED?500:100;
+    const int levels=10000/step, scaled=position*levels;
+    const int previous=slider_value_bp/step;
+    int value=(scaled+SLIDER_SPAN/2)/SLIDER_SPAN;
+    /* Half-pixel hysteresis around quantization boundaries, with exact ends.
+     * ADC already median-filters each coordinate; no long smoothing delay. */
+    if(!first && position>0 && position<SLIDER_SPAN) {
+        const int margin=levels/2;
+        if(value>previous && scaled<previous*SLIDER_SPAN+SLIDER_SPAN/2+margin) value=previous;
+        if(value<previous && scaled>previous*SLIDER_SPAN-SLIDER_SPAN/2-margin) value=previous;
+    }
+    if(!first && abs(x-slider_down_x)>=2 && g_screen_slider_diag.phase!=SCREEN_SLIDER_DRAGGING)
+        g_screen_slider_diag.phase=SCREEN_SLIDER_DRAGGING;
+    const uint16_t bp=(uint16_t)(value*step);
+    if(!first && bp==slider_value_bp) return;
+    slider_value_bp=bp;g_screen_slider_diag.value_bp=bp;
+    if(!first) ++g_screen_slider_diag.moves;
+    if(page==PAGE_NUMBER) {
+        snprintf(edit_value,sizeof(edit_value),"%u",bp/100U);edit_replace=false;
+    } else {
+        DutyTarget *target=&duty_targets[channel];
+        if(!target->valid) target->request_id=0;
+        target->duty_bp=bp;target->valid=true;
+    }
+    ui_result=BIZ_OK;last_refresh=0;
+}
+static void slider_begin(int x)
+{
+    slider_value_bp=slider_display_value();slider_active=true;slider_down_x=(int16_t)x;
+    g_screen_slider_diag.phase=SCREEN_SLIDER_PRESSED;++g_screen_slider_diag.presses;
+    slider_update(x,true);
+}
+static void slider_finish(bool cancelled)
+{
+    if(!slider_active) return;
+    slider_active=false;
+    g_screen_slider_diag.phase=cancelled?SCREEN_SLIDER_CANCELLED:SCREEN_SLIDER_RELEASED;
+    if(cancelled) ++g_screen_slider_diag.cancellations;else ++g_screen_slider_diag.releases;
+    last_refresh=0;
+}
+static void service_duty_targets(void)
+{
+    for(unsigned i=0;i<2;++i) {
+        DutyTarget *target=&duty_targets[i];if(!target->valid)continue;
+        WaveSnapshot w;Wave_GetSnapshot((WaveChannel)i,&w);
+        if(w.owner!=WAVE_OWNER_MANUAL || w.state==WAVE_FAULT || w.state==WAVE_UNINITIALIZED) {
+            target->valid=false;
+            if(page==PAGE_PWM && channel==i) {slider_finish(true);ui_result=BIZ_BUSY;}
+            continue;
+        }
+        if(w.pending) {
+            if(w.request_id!=target->request_id) {
+                target->valid=false;
+                if(page==PAGE_PWM && channel==i) {slider_finish(true);ui_result=BIZ_BUSY;}
+            }
+            continue;
+        }
+        if(w.applied.duty_bp==target->duty_bp) {
+            target->valid=false;
+            if(page==PAGE_PWM && channel==i && ui_result==BIZ_PENDING)ui_result=w.last_result;
+            continue;
+        }
+        WaveParams params=w.applied;params.duty_bp=target->duty_bp;
+        const BizResult result=Wave_Apply((WaveChannel)i,WAVE_OWNER_MANUAL,&params,&target->request_id);
+        if(page==PAGE_PWM && channel==i)ui_result=result;
+        if(!accepted(result) && result!=BIZ_BUSY) {
+            target->valid=false;
+            if(page==PAGE_PWM && channel==i)slider_finish(true);
+        }
+    }
+}
 static void begin_edit(unsigned kind,uint8_t parent)
 {
     WaveSnapshot w;WaveSyncSnapshot sync;
@@ -243,6 +383,7 @@ static bool business_action(uint8_t id)
     }
     case ACT_OUTPUT:
         Wave_GetSnapshot(channel,&w);
+        if(w.enabled) duty_targets[channel].valid=false; /* Stop also cancels queued finger positions. */
         ui_result=Wave_SetEnabled(channel,WAVE_OWNER_MANUAL,!w.enabled,NULL);return true;
     case ACT_SYNC:
         Wave_GetSyncSnapshot(&sync);
@@ -253,13 +394,6 @@ static bool business_action(uint8_t id)
     case ACT_DELETE: {
         const size_t n=strlen(edit_value);if(n) edit_value[n-1]=0;
         edit_replace=false;ui_result=BIZ_OK;return true;
-    }
-    case ACT_SLIDER: {
-        field_cache[2][0]=0; /* Release redraws the button even if the value is unchanged. */
-        int x=(int)g_screen_diag.x-12;if(x<0)x=0;if(x>215)x=215;
-        const unsigned step=Wave_GetMode()==BIZ_MODE_EXTENDED?5U:1U;
-        const unsigned value=((unsigned)x*(100U/step)+107U)/215U*step;
-        snprintf(edit_value,sizeof(edit_value),"%u",value);edit_replace=false;ui_result=BIZ_OK;return true;
     }
     case ACT_CONFIRM: {
         if(!edit_value[0]) {ui_result=BIZ_INVALID_ARGUMENT;return true;}
@@ -288,11 +422,11 @@ static void draw_business_page(void)
         add_button(166,6,66,36,channel==WAVE_CHANNEL_A?"A":"B",ACT_CHANNEL,true);
         ascii(8,48,channel==WAVE_CHANNEL_A?"A: PA8 / JP3.33":"B: PC7 / JP3.38",FG);
         text(8,72,"频率",FG,BG);text(8,106,"占空比",FG,BG);
-        add_button(8,212,104,42,"频率",ACT_FREQUENCY,true);
-        add_button(128,212,104,42,"占空比",ACT_DUTY,true);
-        add_button(8,266,72,42,"开启",ACT_OUTPUT,true);
-        add_button(84,266,72,42,"扩展",ACT_MORE,true);
-        add_button(160,266,72,42,"返回",ACT_MENU,true);
+        add_button(8,226,104,36,"频率",ACT_FREQUENCY,true);
+        add_button(128,226,104,36,"占空比",ACT_DUTY,true);
+        add_button(8,274,72,36,"开启",ACT_OUTPUT,true);
+        add_button(84,274,72,36,"扩展",ACT_MORE,true);
+        add_button(160,274,72,36,"返回",ACT_MENU,true);
         break;
     case PAGE_INPUT:
         title("输入检测");
@@ -328,7 +462,6 @@ static void draw_business_page(void)
             (Wave_GetMode()==BIZ_MODE_EXTENDED?"0..100 %, step 5":"0..100 %, step 1"):
             (Wave_GetMode()==BIZ_MODE_EXTENDED?"1..500000 Hz":"1..200000 Hz");
         ascii(8,78,range,FG);
-        if(edit_kind==EDIT_DUTY) add_button(12,100,216,16,"",ACT_SLIDER,true);
         static const char *const digits[]={"1","2","3","4","5","6","7","8","9"};
         for(unsigned i=0;i<9;++i) add_button(8+(int)(i%3)*76,124+(int)(i/3)*42,72,36,digits[i],ACT_DIGIT+i+1,true);
         add_button(8,250,72,36,"<-",ACT_DELETE,true);
@@ -337,7 +470,7 @@ static void draw_business_page(void)
         break;
     }
     }
-    frame();
+    draw_slider();frame();
 }
 static void refresh_business(uint32_t now)
 {
@@ -349,21 +482,22 @@ static void refresh_business(uint32_t now)
             ui_result=w.last_result;
         format_frequency(line,sizeof(line),w.calculated_frequency_millihz);
         field(0,104,80,128,16,line,ACCENT,false);
-        snprintf(line,sizeof(line),"%u.%02u %%",w.calculated_duty_bp/100,w.calculated_duty_bp%100);
+        const uint16_t displayed_duty=slider_display_value();
+        snprintf(line,sizeof(line),"%u.%02u %%",displayed_duty/100,displayed_duty%100);
         field(1,112,114,120,16,line,ACCENT,false);
         const char *state=w.state==WAVE_UNINITIALIZED?"初始化失败":w.state==WAVE_FAULT?"输出故障":
             w.owner==WAVE_OWNER_SELFTEST?"自检占用":w.pending?"等待生效":!w.enabled?"已关闭":
             w.state==WAVE_DC_LOW?"恒低电平":w.state==WAVE_DC_HIGH?"恒高电平":"运行";
-        field(2,8,142,224,29,state,w.state==WAVE_FAULT?ALERT:FG,true);
-        snprintf(line,sizeof(line),"REQ %luHz %u%% %s",(unsigned long)w.requested.frequency_hz,
-            w.requested.duty_bp/100,w.pending?"WAIT":"");
-        field(3,8,176,224,16,line,FG,false);
-        field(4,8,194,224,16,result_text(ui_result),accepted(ui_result)?FG:ALERT,false);
+        field(2,8,174,224,29,state,w.state==WAVE_FAULT?ALERT:FG,true);
+        if(accepted(ui_result)) snprintf(line,sizeof(line),"ACT %u.%02u%%  %s",w.calculated_duty_bp/100,
+            w.calculated_duty_bp%100,(w.pending || duty_targets[channel].valid)?"WAIT":"OK");
+        else snprintf(line,sizeof(line),"%s",result_text(ui_result));
+        field(3,8,206,224,16,line,accepted(ui_result)?FG:ALERT,false);
         const bool manual=w.owner==WAVE_OWNER_MANUAL && w.state!=WAVE_UNINITIALIZED && w.state!=WAVE_FAULT;
         const bool ready=manual && !w.pending && !sync.phase_pending &&
             (sync.state==WAVE_SYNC_OFF || sync.state==WAVE_SYNC_ON);
-        set_button(ACT_FREQUENCY,"频率",ready && sync.state==WAVE_SYNC_OFF);
-        set_button(ACT_DUTY,"占空比",ready);
+        set_button(ACT_FREQUENCY,"频率",ready && !duty_targets[channel].valid && sync.state==WAVE_SYNC_OFF);
+        set_button(ACT_DUTY,"占空比",ready && !duty_targets[channel].valid);
         set_button(ACT_OUTPUT,w.enabled?"关闭":"开启",manual && sync.state==WAVE_SYNC_OFF && (!w.pending || w.enabled));
     } else if(page==PAGE_INPUT) {
         InputSnapshot in;Input_GetSnapshot(&in);
@@ -429,19 +563,13 @@ static void refresh_business(uint32_t now)
         snprintf(line,sizeof(line),"%s %s",edit_value,edit_kind==EDIT_FREQUENCY?"Hz":edit_kind==EDIT_DUTY?"%":"deg");
         field(0,8,50,224,20,line,ACCENT,false);
         field(1,8,296,224,16,result_text(ui_result),accepted(ui_result)?FG:ALERT,false);
-        if(edit_kind==EDIT_DUTY) {
-            unsigned value=(unsigned)strtoul(edit_value,NULL,10);if(value>100)value=100;
-            snprintf(line,sizeof(line),"%u",value);
-            if(strcmp(field_cache[2],line)) {
-                strcpy(field_cache[2],line);fill(13,101,214,14,PALE);
-                fill(13,101,(int)(214U*value/100U),14,ACCENT);
-            }
-        }
     }
+    draw_slider();
 }
 static void draw_page(void)
 {
     LCD_Clear(BG);button_count=0;captured=-1;
+    slider_painted=UINT32_MAX;
     memset(field_cache,0,sizeof(field_cache));
     memset(field_colors,0,sizeof(field_colors));
     switch(page) {
@@ -483,6 +611,7 @@ static void draw_page(void)
 }
 static void navigate(uint8_t next)
 {
+    slider_finish(true);
     if(page==PAGE_SNAKE && next!=PAGE_SNAKE) Snake_SetRunning(false);
     last_snake_step=HAL_GetTick();
     page=next;g_screen_diag.page=page;
@@ -576,6 +705,8 @@ void ScreenApp_Init(void)
     g_screen_diag.calibration_result=calibration.valid?2:3;
     extensions_enabled=Wave_GetMode()==BIZ_MODE_EXTENDED && Input_GetMode()==BIZ_MODE_EXTENDED;
     ui_result=BIZ_OK;channel=WAVE_CHANNEL_A;
+    memset(duty_targets,0,sizeof(duty_targets));slider_active=false;
+    memset((void *)&g_screen_slider_diag,0,sizeof(g_screen_slider_diag));
     page=PAGE_MENU;g_screen_diag.page=page;
     draw_page();
     g_screen_diag.stage=g_screen_diag.selftest!=0x7f?0xE1:calibration.valid?4:0xE2;
@@ -585,6 +716,7 @@ void ScreenApp_Process(uint32_t now)
 {
     if((uint32_t)(now-last_scan)<8) return;
     last_scan=now;
+    service_duty_targets();
     const uint32_t service_start=DWT->CYCCNT;
     const uint32_t scan_start=DWT->CYCCNT;
     const ScreenTouchSample sample=ScreenTouch_Read();
@@ -605,18 +737,25 @@ void ScreenApp_Process(uint32_t now)
             int16_t x,y;
             if(sample.valid && ScreenCal_Map(&calibration,raw_x,raw_y,width,height,&x,&y)) {
                 const bool first=!have_xy;
+                g_screen_diag.x=(uint32_t)x;g_screen_diag.y=(uint32_t)y;
                 if(first) {
-                    for(unsigned i=0;i<button_count;++i) if(buttons[i].enabled && inside(&buttons[i],x,y)) {
-                        captured=(int)i;draw_button(i,true);break;
+                    if(slider_hit(x,y) && slider_editable()) slider_begin(x);
+                    else {
+                        for(unsigned i=0;i<button_count;++i) if(buttons[i].enabled && inside(&buttons[i],x,y)) {
+                            captured=(int)i;draw_button(i,true);break;
+                        }
                     }
                 }
-                if(captured>=0 && !inside(&buttons[captured],x,y)) {
+                /* A slider captures this entire gesture. Leaving its rectangle
+                 * clamps X; it cannot turn into a button click beneath a finger. */
+                if(slider_active && !first) slider_update(x,false);
+                if(!slider_active && captured>=0 && !inside(&buttons[captured],x,y)) {
                     gesture_cancelled=true;draw_button((unsigned)captured,false);captured=-1;
                 }
                 have_xy=true;last_good_at=now;
-                g_screen_diag.x=(uint32_t)x;g_screen_diag.y=(uint32_t)y;
             } else if((uint32_t)(now-last_good_at)>120) {
                 gesture_cancelled=true;
+                slider_finish(true);
                 if(captured>=0){draw_button((unsigned)captured,false);captured=-1;}
             }
         }
@@ -624,6 +763,7 @@ void ScreenApp_Process(uint32_t now)
         if(!pen_up_at) pen_up_at=now;
         if((uint32_t)(now-pen_up_at)>=16) {
             held=false;pen_up_at=0;
+            slider_finish(gesture_cancelled || !have_xy || (uint32_t)(now-last_good_at)>=120);
             if(wait_release) wait_release=false;
             else if(captured>=0) {
                 const unsigned index=(unsigned)captured;captured=-1;draw_button(index,false);
@@ -634,6 +774,7 @@ void ScreenApp_Process(uint32_t now)
     } else {
         if(wait_release) wait_release=false;
     }
+    service_duty_targets();
     if(page==PAGE_SNAKE) {
         if((uint32_t)(now-last_snake_step)>=SNAKE_STEP_MS) {
             /* One step per service; never burst through delayed frames. */

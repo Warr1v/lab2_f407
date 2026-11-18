@@ -43,7 +43,7 @@ class ScreenSystem(System):
         self.call('ScreenApp_Init')
         self.scan(8)
 
-    def scan(self,ms=8,pressed=False,x=0,y=0):
+    def scan(self,ms=8,pressed=False,x=0,y=0,valid=None):
         self.now=(self.now+ms)&0xffffffff
         # The same order as production main; no backend is skipped on a page.
         for t in self.flags:
@@ -56,7 +56,7 @@ class ScreenSystem(System):
         self.call('Wave_Process',self.now)
         self.call('Input_Process',self.now)
         self.call('Sweep_Process',self.now)
-        self.ui.sample=(pressed,pressed,x,y)
+        self.ui.sample=(pressed,pressed if valid is None else valid,x,y)
         self.ui.now=self.now
         self.call('ScreenApp_Process',self.now)
 
