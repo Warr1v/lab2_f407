@@ -14,6 +14,12 @@
 #define WAVE_TIMER_HZ           168000000U
 #define WAVE_IRQ_PRIORITY       6U
 #define WAVE_SYNC_B_SCALE       3U
+#define SPWM_TIMER_HZ           84000000U
+#define SPWM_CARRIER_HZ         20000U
+#define SPWM_SINE_HZ            50U
+#define SPWM_SAMPLE_COUNT       400U
+#define SPWM_MODULATION_BP      8000U
+#define SPWM_DMA_IRQ_PRIORITY   10U
 
 /* Release firmware never changes parameters automatically. */
 #ifndef WAVE_DIAGNOSTIC_ENABLE

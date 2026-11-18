@@ -92,6 +92,7 @@ int main(void)
   MX_FSMC_Init();
   /* USER CODE BEGIN 2 */
   (void)Wave_Init();
+  (void)Spwm_Init();
   ScreenApp_Init();
 
   /* USER CODE END 2 */

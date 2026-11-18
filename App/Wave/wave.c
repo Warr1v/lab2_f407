@@ -1,6 +1,7 @@
 #include "business_api.h"
 #include "wave_config.h"
 #include "wave_hw.h"
+#include "spwm_private.h"
 #include <string.h>
 
 typedef struct {
@@ -95,6 +96,7 @@ BizResult Wave_Init(void)
 void Wave_Process(uint32_t now_ms)
 {
     (void)now_ms;
+    Spwm_Service();
     if (!initialized) return;
     const uint32_t p = lock();
     /* A main-loop fallback for delayed acknowledgement, never wave generation. */
@@ -149,7 +151,7 @@ void Wave_GetCapabilities(WaveCapabilities *out)
     *out = (WaveCapabilities){WAVE_MIN_HZ,
         mode == BIZ_MODE_STANDARD ? WAVE_STANDARD_MAX_HZ : WAVE_EXTENDED_MAX_HZ,
         WAVE_MAX_DUTY_BP, mode == BIZ_MODE_STANDARD ? WAVE_STANDARD_STEP_BP : WAVE_EXTENDED_STEP_BP,
-        WAVE_PHASE_STEP_DEG, true, true, false};
+        WAVE_PHASE_STEP_DEG, true, true, Spwm_Ready()};
 }
 BizResult Wave_SetMode(BizMode m)
 {

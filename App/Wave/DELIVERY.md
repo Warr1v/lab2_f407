@@ -30,3 +30,11 @@ One-shot TIM1/TIM8 update IRQs also progress synchronization. No persistent peri
 Standard remains 1..200000 Hz / 100 bp. Extended is 1..500000 Hz / 500 bp across its entire range. Both saved channel parameter sets are validated before mode changes. No clamping, rounding, pending overwrite, synchronization change or SELFTEST ownership bypass. Hardware timing calculation and CCR preload are the same proven 16-bit path; N=336 at 500 kHz.
 
 2026-11-18: Debug 51452 B Flash / 3512 B RAM; Release 39872 B / 3512 B, no warnings. 336 dual-channel 5% duty cases across eight representative frequencies, invalid mode/step/range/pending transitions, and the entire forward/reverse phase grid at 500 kHz passed real-ELF controlled-MMIO tests. Maximum computed phase rounding for that 500 kHz grid was 0.357 degrees. Silicon output, ITR propagation, actual scope errors and concurrent input/SPWM load are still unmeasured.
+
+## W4
+
+PA3 AF1 TIM2_CH4, 84 MHz / 4200 = 20 kHz, 400 samples = 50 Hz, modulation 8000 bp. DMA1 Stream1 Channel3, UPDATE UDE to CCR4, circular halfwords, medium DMA priority, IRQ priority 10 (below input's required priority). No HT/TC IRQ, only TE/DME/FE errors. TIM2 has no period IRQ. 800 B table in ordinary SRAM, aligned 4. Active/preload/DMA start at samples 0/1/2, rotated ring [2..399,0,1] preserves every sample through wrap. Stop disables requests/counter, latches zero, disables stream without busy waiting; if EN shutdown is still pending, Wave_Process calls Spwm_Service until completion. Errors force PA3 low, increment g_spwm_dma_error_count and report HARDWARE_ERROR; an explicit restart rebuilds the DMA pipeline.
+
+Shared DMA1 is never reset. Init only configures Stream1, preserving the input module's Stream2/4. No HAL DMA callback symbols are overridden. Stream1 global vector forwards to Spwm_DMA1_Stream1IRQ. The filter design, loaded two-pole transfer function, instrument/drive conditions and pending measurement table are in FILTER.md.
+
+2026-11-18: Debug 57104 B Flash / 4344 B RAM; Release 45016 B / 4336 B; no warnings. Real-ELF tests check table values, 1201 pipeline samples/three wraps, request channel/destination/priority, normal stop, injected DMA error/explicit restart and other-stream sentinels. Neither analogue filter nor real DMA contention has been tested.

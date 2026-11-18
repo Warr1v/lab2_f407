@@ -56,6 +56,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Wave/wave.c
     App/Wave/wave_hw.c
     App/Wave/wave_math.c
+    App/Wave/spwm.c
 )
 
 # Add include paths
@@ -77,7 +78,8 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 # Keep the frozen API callable from a debugger before the real UI is integrated.
 foreach(api Wave_Init Wave_Process Wave_SetMode Wave_GetMode Wave_GetCapabilities
     Wave_Apply Wave_SetEnabled Wave_GetSnapshot Wave_SetSync Wave_SetPhase
-    Wave_GetSyncSnapshot Wave_AcquireA Wave_ReleaseA Wave_Calculate)
+    Wave_GetSyncSnapshot Wave_AcquireA Wave_ReleaseA Wave_Calculate
+    Spwm_Init Spwm_Start Spwm_Stop Spwm_GetSnapshot)
     target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,--undefined=${api}")
 endforeach()
 
