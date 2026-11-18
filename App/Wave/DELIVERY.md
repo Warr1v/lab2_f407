@@ -14,3 +14,13 @@ Build Debug/Release using the P1 toolchain. `tests/verify_wave.py --stage W1` ru
 2026-11-18 checks: Debug 49124 B Flash / 3480 B RAM; Release 38292 B Flash / 3456 B RAM; no warnings. W1 real-ELF API checks passed; 8410 compiled calculation cases passed (worst sampled frequency 0.148621%, duty 0.148368 points). Existing snake/UI/stopwatch emulator regression passed, including 12 automatic wins in 42137 steps. No flashing or physical measurements.
 
 Public differences: CMake source/includes/API retention, main Wave_Init/Process, shared IRQ forwarding. CubeMX is NOT run automatically; final resource configuration and regeneration ownership are described with later stages.
+
+## W2
+
+B: PC7 AF3 TIM8_CH2, independent frequency/duty/start/stop. TIM1 CH2 is internal PWM2 (no PA9 configuration); nonzero phase TRGO=OC2REF; zero uses UPDATE. TIM8 ITR0 reset mode uses a 3x prescaler and large ARR, preserving complete high pulses while extending low intervals during delayed phase changes. B timing is quantized in 3 A ticks; calculated duty reports this, not the independent CCR/N ratio.
+
+First join waits for B's natural update, then a complete A boundary, and connects only after that A event. The first reset occurs at the following A event, extending a low interval rather than inserting a short pulse. Exit preloads independent B timing, waits for a final hardware reset transfer, then disconnects. No running timer is stopped or software-UG restarted by these operations. Nonzero phase advances are limited to half the available B low interval per step. Large advances at 99%/low frequency may take many periods and stay pending; UI must poll, never wait. Zero transitions deliberately extend a low interval. OC2REF selection first installs an inactive active compare before preloading the target, avoiding a false edge if the CPU is slower than the requested phase delay.
+
+One-shot TIM1/TIM8 update IRQs also progress synchronization. No persistent period IRQ or global HAL callback. Raw handler forwarding must coexist with any future TIM10/TIM13 sharing. Neither timer is allocated by P1.
+
+2026-11-18: Debug 51356 B Flash / 3512 B RAM, Release 39804 B / 3512 B; no warnings. Actual ARM API tests pass dual independent operation, all 73 phase grid values forward/reverse, large advances/wraps, DC transitions and explicit sync exit. Maximum computed phase rounding in the 1000 Hz grid was 0.003 degrees. Hardware propagation delay, first join/exit and narrow-pulse behavior remain scope tests, not emulator results.

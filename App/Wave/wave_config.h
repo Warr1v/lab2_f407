@@ -13,6 +13,7 @@
 #define WAVE_DEFAULT_DUTY_BP    5000U
 #define WAVE_TIMER_HZ           168000000U
 #define WAVE_IRQ_PRIORITY       6U
+#define WAVE_SYNC_B_SCALE       3U
 
 /* Release firmware never changes parameters automatically. */
 #ifndef WAVE_DIAGNOSTIC_ENABLE

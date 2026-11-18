@@ -10,6 +10,8 @@ TIM_TypeDef *WaveHW_Timer(WaveChannel channel);
 void WaveHW_Stage(WaveChannel channel, const WaveTiming *timing);
 void WaveHW_Start(WaveChannel channel, const WaveTiming *timing);
 void WaveHW_Stop(WaveChannel channel);
+void WaveHW_StageReference(uint32_t count, bool leaving_zero);
+void WaveHW_ArmAUpdate(void);
 void Wave_TIM1_UpdateIRQ(void);
 void Wave_TIM8_UpdateIRQ(void);
 #endif
