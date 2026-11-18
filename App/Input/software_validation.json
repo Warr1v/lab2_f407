@@ -1,0 +1,243 @@
+{
+  "date": "2026-11-18",
+  "baseline": "0df814ca1bb0c6a713d38eae72504c2ba12749af",
+  "branch": "feature/input-capture",
+  "evidence": "software only; controlled ARM/MMIO/DMA models",
+  "hardware": {
+    "flashed": false,
+    "external_signal": false,
+    "physical_loopback": false,
+    "physical_accuracy": "PENDING",
+    "screen_response": "PENDING",
+    "irq_time_and_contention": "PENDING"
+  },
+  "wave_reference_sha": "8f300542703d8113984870726b86d1501683fb03",
+  "images": {
+    "Debug": {
+      "path": "build/Debug/lab2_f407.elf",
+      "sha256": "ae02f750db4ea8cfde9aa0d4851ae4d792f4d1f56dd11063944fe2cd852aecef",
+      "flash_bytes": 48380,
+      "ram_bytes": 7544,
+      "ccm_bytes": 0
+    },
+    "Release": {
+      "path": "build/Release/lab2_f407.elf",
+      "sha256": "c5de01b0fa17d1cea9fbda8e01e01ea339c363fc24a59f6ec677d5fdda3f87fb",
+      "flash_bytes": 38864,
+      "ram_bytes": 7544,
+      "ccm_bytes": 0
+    },
+    "Diagnostic": {
+      "path": "build/Diagnostic/lab2_f407.elf",
+      "sha256": "2602d570e4ad2b5b1582f115ed89904aff5a2cd390ccaffa562b4c1f60c27332",
+      "flash_bytes": 48728,
+      "ram_bytes": 7864,
+      "ccm_bytes": 0
+    },
+    "Integration": {
+      "path": "build/Integration/lab2_f407.elf",
+      "sha256": "c3891c93db8d0b5ea579a423124c79e1d99c74b0c1cfbb5e9c8a146e59768249",
+      "flash_bytes": 65176,
+      "ram_bytes": 9144,
+      "ccm_bytes": 0
+    }
+  },
+  "tests": {
+    "Debug": {
+      "checks": 982,
+      "targets": [
+        {
+          "elf": "build/Debug/input_logic_tests.elf",
+          "checks": 628,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Debug/sweep_logic_tests.elf",
+          "checks": 177,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Debug/sweep_fault_1.elf",
+          "checks": 9,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Debug/sweep_fault_2.elf",
+          "checks": 50,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Debug/sweep_fault_3.elf",
+          "checks": 29,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Debug/sweep_fault_4.elf",
+          "checks": 30,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Debug/sweep_fault_5.elf",
+          "checks": 50,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Debug/sweep_fault_6.elf",
+          "checks": 9,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        }
+      ]
+    },
+    "Release": {
+      "checks": 982,
+      "targets": [
+        {
+          "elf": "build/Release/input_logic_tests.elf",
+          "checks": 628,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Release/sweep_logic_tests.elf",
+          "checks": 177,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Release/sweep_fault_1.elf",
+          "checks": 9,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Release/sweep_fault_2.elf",
+          "checks": 50,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Release/sweep_fault_3.elf",
+          "checks": 29,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Release/sweep_fault_4.elf",
+          "checks": 30,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Release/sweep_fault_5.elf",
+          "checks": 50,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        },
+        {
+          "elf": "build/Release/sweep_fault_6.elf",
+          "checks": 9,
+          "failed_line": 0,
+          "returned": true,
+          "exit_code": 0
+        }
+      ]
+    },
+    "dma_port": {
+      "production_input_and_dma_port": "PASS",
+      "mode": "modeled DMA registers",
+      "cycles_streamed": 13192,
+      "dma_wraps": 25,
+      "electrical_hardware": "not tested"
+    },
+    "real_modules_integration": {
+      "real_wave_sha": "8f300542703d8113984870726b86d1501683fb03",
+      "actual_wave_input_sweep_arm_code": "PASS",
+      "normal": [
+        {
+          "set_frequency_hz": 10,
+          "measured_frequency_millihz": 10000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 20,
+          "measured_frequency_millihz": 20000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 50,
+          "measured_frequency_millihz": 50000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 100,
+          "measured_frequency_millihz": 100001,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 500,
+          "measured_frequency_millihz": 500000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 1000,
+          "measured_frequency_millihz": 1000000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 5000,
+          "measured_frequency_millihz": 5000000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 20000,
+          "measured_frequency_millihz": 20000000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 100000,
+          "measured_frequency_millihz": 100000000,
+          "state": 1
+        },
+        {
+          "set_frequency_hz": 200000,
+          "measured_frequency_millihz": 200000000,
+          "state": 1
+        }
+      ],
+      "disconnected": "FAIL with verified restore",
+      "cancel": "CANCELLED with verified restore",
+      "B_and_SPWM_unchanged": true,
+      "electrical_loopback": "not performed"
+    },
+    "baseline_regression": {
+      "automatic_seeds": 12,
+      "automatic_steps": 42137,
+      "core": "PASS",
+      "ui": "PASS",
+      "hardware": "not tested"
+    }
+  }
+}

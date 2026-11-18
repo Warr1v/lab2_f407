@@ -26,6 +26,9 @@
 #include "screen_app.h"
 #include "business_api.h"
 #include "wave_diagnostics.h"
+#if defined(LAB2_ENABLE_INPUT_DEBUG)
+#include "input_debug.h"
+#endif
 
 /* USER CODE END Includes */
 
@@ -94,6 +97,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   (void)Wave_Init();
   (void)Spwm_Init();
+  (void)Input_Init();
+  (void)Sweep_Init();
+#if defined(LAB2_ENABLE_INPUT_DEBUG)
+  InputDebug_Init();
+#endif
   ScreenApp_Init();
 
   /* USER CODE END 2 */
@@ -105,8 +113,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Wave_Process(HAL_GetTick());
-    WaveTest_Process(HAL_GetTick());
+    const uint32_t now = HAL_GetTick();
+    Wave_Process(now);
+    Input_Process(now);
+    Sweep_Process(now);
+    WaveTest_Process(now);
+#if defined(LAB2_ENABLE_INPUT_DEBUG)
+    InputDebug_Process();
+#endif
     ScreenApp_Process(HAL_GetTick());
   }
   /* USER CODE END 3 */

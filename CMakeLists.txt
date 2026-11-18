@@ -58,6 +58,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Wave/wave_math.c
     App/Wave/spwm.c
     App/Wave/wave_diagnostics.c
+    App/Input/input.c
+    App/Input/input_port_stm32.c
 )
 
 # Add include paths
@@ -69,6 +71,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Game
     App/Contracts
     App/Wave
+    App/Input
+    App/SelfTest
 )
 
 # Add project symbols (macros)
@@ -81,14 +85,6 @@ if(WAVE_ENABLE_DIAGNOSTICS)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE WAVE_DIAGNOSTIC_ENABLE=1)
 endif()
 
-# Keep the frozen API callable from a debugger before the real UI is integrated.
-foreach(api Wave_Init Wave_Process Wave_SetMode Wave_GetMode Wave_GetCapabilities
-    Wave_Apply Wave_SetEnabled Wave_GetSnapshot Wave_SetSync Wave_SetPhase
-    Wave_GetSyncSnapshot Wave_AcquireA Wave_ReleaseA Wave_Calculate
-    Spwm_Init Spwm_Start Spwm_Stop Spwm_GetSnapshot)
-    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,--undefined=${api}")
-endforeach()
-
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
@@ -98,3 +94,42 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# Keep cursor snapshots shorter than an edge interval even in Debug; -g3 is
+# preserved. Measurement arithmetic stays in main-loop input.c.
+set_source_files_properties(App/Input/input_port_stm32.c PROPERTIES COMPILE_OPTIONS "-O2")
+option(LAB2_ENABLE_INPUT_DEBUG "Enable debugger mailbox commands (no automatic output)" OFF)
+if(LAB2_ENABLE_INPUT_DEBUG)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/Input/input_debug.c)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE LAB2_ENABLE_INPUT_DEBUG=1)
+endif()
+
+option(LAB2_BUILD_BUSINESS_TESTS "Build isolated ARM logic tests with fake hardware" OFF)
+# One production composition: latest Wave, Input and the sole Sweep controller.
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    App/SelfTest/sweep.c App/SelfTest/sweep_port_stm32.c)
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE LAB2_ENABLE_SWEEP=1)
+# Preserve diagnostic/capability queries even when the current UI does not use them.
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    -Wl,--undefined=Wave_GetCapabilities -Wl,--undefined=Input_GetCapabilities
+    -Wl,--undefined=Sweep_GetDiagnostics)
+if(LAB2_BUILD_BUSINESS_TESTS)
+    add_executable(input_logic_tests
+        tests/business/test_input.c tests/business/fake_input_port.c App/Input/input.c)
+    target_include_directories(input_logic_tests PRIVATE App/Contracts App/Input tests/business)
+    target_link_options(input_logic_tests PRIVATE -nostartfiles -Wl,-e,main
+        -Wl,-Map=input_logic_tests.map)
+    add_executable(sweep_logic_tests tests/business/test_sweep.c
+        tests/business/fake_sweep_business.c App/SelfTest/sweep.c)
+    target_include_directories(sweep_logic_tests PRIVATE App/Contracts App/SelfTest tests/business)
+    target_link_options(sweep_logic_tests PRIVATE -nostartfiles -Wl,-e,main
+        -Wl,-Map=sweep_logic_tests.map)
+    foreach(scenario RANGE 1 6)
+        add_executable(sweep_fault_${scenario} tests/business/test_sweep_faults.c
+            tests/business/fake_sweep_business.c App/SelfTest/sweep.c)
+        target_include_directories(sweep_fault_${scenario} PRIVATE App/Contracts App/SelfTest tests/business)
+        target_compile_definitions(sweep_fault_${scenario} PRIVATE SCENARIO=${scenario})
+        target_link_options(sweep_fault_${scenario} PRIVATE -nostartfiles -Wl,-e,main
+            -Wl,-Map=sweep_fault_${scenario}.map)
+    endforeach()
+endif()

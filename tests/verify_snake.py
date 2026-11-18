@@ -173,150 +173,155 @@ class Firmware:
         (OUT/name).write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB",240,320,8,2,0,0,0)) + chunk(b"IDAT",zlib.compress(rows)) + chunk(b"IEND",b""))
 
 
-fw = Firmware()
-fw.call("Snake_Reset", 0, 123)
-initial = fw.state()
-assert initial[2:] == (0, False)
-fw.call("Snake_Step")
-assert fw.state() == initial
-for invalid in [3, 255, 0xFFFFFFFF]:
-    fw.call("Snake_SetDirection", invalid)
-    assert fw.state() == initial  # reverse/invalid direction cannot start a game
-fw.call("Snake_SetDirection", 0)
-fw.call("Snake_SetDirection", 3)
-fw.call("Snake_Step")
-assert fw.state()[0].index(2) == 52  # second turn is ignored in the same step
-fw.call("Snake_SetRunning", 0)
-paused = fw.state()
-fw.call("Snake_SetDirection", 1)
-fw.call("Snake_Step")
-assert fw.state() == paused and paused[2] == 4
-fw.call("Snake_SetRunning", 1)
-for _ in range(6):
-    fw.call("Snake_Step")
-assert fw.state()[2] == 2  # top wall
-lost = fw.state()
-fw.call("Snake_SetRunning", 1)
-fw.call("Snake_Step")
-assert fw.state() == lost
-
-# Ring-buffer wrap, legal movement into a departing tail, and body collision.
-for trail, expected in [([61,62,72,71], 1), ([60,61,62,72,71], 2)]:
+def main():
+    fw = Firmware()
     fw.call("Snake_Reset", 0, 123)
-    cells = bytearray(120)
-    for cell in trail[:-1]:
-        cells[cell] = 1
-    cells[trail[-1]], cells[119] = 2, 3
-    fw.uc.mem_write(fw.syms["game"][0], bytes(cells))
-    fw.uc.mem_write(fw.syms["game"][0]+fw.offsets["score"], bytes([len(trail)-3]))
-    for name, value in [("length",len(trail)), ("tail_slot",118), ("head",71), ("direction",3), ("pending_direction",3)]:
-        fw.number(name, value)
-    for i, cell in enumerate(trail):
-        fw.uc.mem_write(fw.syms["body"][0]+(118+i)%120, bytes([cell]))
-    fw.call("Snake_SetDirection", 0)
+    initial = fw.state()
+    assert initial[2:] == (0, False)
     fw.call("Snake_Step")
-    assert fw.state()[2] == expected
-    fw.invariant()
+    assert fw.state() == initial
+    for invalid in [3, 255, 0xFFFFFFFF]:
+        fw.call("Snake_SetDirection", invalid)
+        assert fw.state() == initial  # reverse/invalid direction cannot start a game
+    fw.call("Snake_SetDirection", 0)
+    fw.call("Snake_SetDirection", 3)
+    fw.call("Snake_Step")
+    assert fw.state()[0].index(2) == 52  # second turn is ignored in the same step
+    fw.call("Snake_SetRunning", 0)
+    paused = fw.state()
+    fw.call("Snake_SetDirection", 1)
+    fw.call("Snake_Step")
+    assert fw.state() == paused and paused[2] == 4
+    fw.call("Snake_SetRunning", 1)
+    for _ in range(6):
+        fw.call("Snake_Step")
+    assert fw.state()[2] == 2  # top wall
+    lost = fw.state()
+    fw.call("Snake_SetRunning", 1)
+    fw.call("Snake_Step")
+    assert fw.state() == lost
 
-steps = 0
-for seed in [0,1,2,3,17,42,123,65535,65536,0x12345678,0x80000000,0xFFFFFFFF]:
-    fw.call("Snake_Reset", 1, seed)
-    for step in range(14041):
+    # Ring-buffer wrap, legal movement into a departing tail, and body collision.
+    for trail, expected in [([61,62,72,71], 1), ([60,61,62,72,71], 2)]:
+        fw.call("Snake_Reset", 0, 123)
+        cells = bytearray(120)
+        for cell in trail[:-1]:
+            cells[cell] = 1
+        cells[trail[-1]], cells[119] = 2, 3
+        fw.uc.mem_write(fw.syms["game"][0], bytes(cells))
+        fw.uc.mem_write(fw.syms["game"][0]+fw.offsets["score"], bytes([len(trail)-3]))
+        for name, value in [("length",len(trail)), ("tail_slot",118), ("head",71), ("direction",3), ("pending_direction",3)]:
+            fw.number(name, value)
+        for i, cell in enumerate(trail):
+            fw.uc.mem_write(fw.syms["body"][0]+(118+i)%120, bytes([cell]))
+        fw.call("Snake_SetDirection", 0)
+        fw.call("Snake_Step")
+        assert fw.state()[2] == expected
+        fw.invariant()
+
+    steps = 0
+    for seed in [0,1,2,3,17,42,123,65535,65536,0x12345678,0x80000000,0xFFFFFFFF]:
+        fw.call("Snake_Reset", 1, seed)
+        for step in range(14041):
+            if fw.state()[2] != 1:
+                break
+            fw.call("Snake_Step")
+            steps += 1
+            if step % 64 == 0:
+                fw.invariant()
+        fw.invariant()
+        assert fw.state()[1:3] == (117, 3), (seed, step, fw.state()[1:])
+        won = fw.state()
+        fw.call("Snake_SetRunning", 1)
+        fw.call("Snake_Step")
+        assert fw.state() == won
+    print(f"PASS: manual, direction validation, pause, wall/body/tail, ring wrap; 12 automatic wins in {steps} steps")
+
+    # Use a fresh ELF image for UI/touch tests.
+    fw = Firmware()
+    fw.call("ScreenApp_Init")
+    fw.scan()
+    fw.click(180, 250, settle=False)
+    assert fw.state()[2] == 0 and fw.number("button_count") == 8
+    fw.snapshot("manual_ready.png")
+    fw.click(200, 165)  # immediate next press is blocked by page-transition guard
+    assert fw.state()[2] == 0
+    fw.click(200, 165)  # right begins manual play
+    assert fw.state()[2] == 1
+    start = fw.state()[0]
+    fw.scan(180)
+    assert fw.state()[0] != start
+    fw.click(180, 24)  # pause
+    assert fw.state()[2] == 4
+    paused = fw.state()
+    fw.scan(2000)
+    assert fw.state() == paused
+    fw.click(180, 24)
+    assert fw.state()[2] == 1
+    fw.click(200, 290)  # return pauses and freezes the game
+    paused = fw.state()
+    assert paused[2] == 4
+    fw.scan(5000)
+    assert fw.state() == paused
+    fw.click(180, 250)
+    assert fw.state() == paused
+    fw.click(120, 290)  # reset
+    assert fw.state()[2:] == (0, False)
+    fw.scan(8, True, 40, 290)  # hold mode; fires only on release
+    for _ in range(20):
+        fw.scan(8, True, 40, 290)
+    assert not fw.state()[3]
+    fw.scan(8)
+    fw.scan(16)
+    assert fw.state()[3]
+    fw.scan(8, True, 40, 290)  # move out cancels mode change
+    fw.scan(8, True, 100, 250)
+    fw.scan(8)
+    fw.scan(16)
+    assert fw.state()[3]
+    fw.snapshot("automatic_running.png")
+    before = fw.state()
+    fw.scan(10000)  # a delayed frame advances once, not 55 times
+    assert fw.state()[0].index(2) == before[0].index(2)+1
+    fw.click(180,24)
+    assert fw.state()[2] == 4
+    fw.now = 0xFFFFFFC0
+    fw.click(180,24)
+    assert fw.state()[2] == 1
+    before = fw.state()
+    fw.scan(180)
+    assert fw.now < 200 and fw.state()[0] != before[0]
+    fw.click(40,290)  # manual mode starts with a fresh ready board
+    assert fw.state()[2:] == (0, False)
+    fw.click(200,165)
+    for _ in range(8):
+        fw.scan(180)
+    assert fw.state()[2] == 2
+    fw.snapshot("manual_lost.png")
+    lost = fw.state()
+    fw.click(180,24)
+    fw.click(200,165)
+    assert fw.state() == lost  # terminal-state buttons are disabled
+    fw.click(120,290)
+    assert fw.state()[2] == 0
+    fw.click(40,290)
+    for _ in range(14041):
         if fw.state()[2] != 1:
             break
         fw.call("Snake_Step")
-        steps += 1
-        if step % 64 == 0:
-            fw.invariant()
-    fw.invariant()
-    assert fw.state()[1:3] == (117, 3), (seed, step, fw.state()[1:])
-    won = fw.state()
-    fw.call("Snake_SetRunning", 1)
-    fw.call("Snake_Step")
-    assert fw.state() == won
-print(f"PASS: manual, direction validation, pause, wall/body/tail, ring wrap; 12 automatic wins in {steps} steps")
+    fw.scan()
+    assert fw.state()[1:3] == (117,3)
+    fw.snapshot("automatic_won.png")
+    fw.click(200,290)
+    fw.click(60,190)  # existing stopwatch page still works
+    fw.click(40,236)
+    fw.scan(1000)
+    assert fw.number("page") == 5
+    assert fw.call("ScreenMock_Time", fw.syms["mock"][0], fw.now) >= 1000
+    fw.snapshot("stopwatch_regression.png")
+    print("PASS: real UI navigation, direction touch, pause/resume/reset, preserved progress, long hold, move-out cancellation, delayed frame and tick wrap")
+    (OUT/"result.json").write_text(json.dumps({"automatic_seeds":12,"automatic_steps":steps,"core":"PASS","ui":"PASS","hardware":"not tested"}, indent=2))
 
-# Use a fresh ELF image for UI/touch tests.
-fw = Firmware()
-fw.call("ScreenApp_Init")
-fw.scan()
-fw.click(180, 250, settle=False)
-assert fw.state()[2] == 0 and fw.number("button_count") == 8
-fw.snapshot("manual_ready.png")
-fw.click(200, 165)  # immediate next press is blocked by page-transition guard
-assert fw.state()[2] == 0
-fw.click(200, 165)  # right begins manual play
-assert fw.state()[2] == 1
-start = fw.state()[0]
-fw.scan(180)
-assert fw.state()[0] != start
-fw.click(180, 24)  # pause
-assert fw.state()[2] == 4
-paused = fw.state()
-fw.scan(2000)
-assert fw.state() == paused
-fw.click(180, 24)
-assert fw.state()[2] == 1
-fw.click(200, 290)  # return pauses and freezes the game
-paused = fw.state()
-assert paused[2] == 4
-fw.scan(5000)
-assert fw.state() == paused
-fw.click(180, 250)
-assert fw.state() == paused
-fw.click(120, 290)  # reset
-assert fw.state()[2:] == (0, False)
-fw.scan(8, True, 40, 290)  # hold mode; fires only on release
-for _ in range(20):
-    fw.scan(8, True, 40, 290)
-assert not fw.state()[3]
-fw.scan(8)
-fw.scan(16)
-assert fw.state()[3]
-fw.scan(8, True, 40, 290)  # move out cancels mode change
-fw.scan(8, True, 100, 250)
-fw.scan(8)
-fw.scan(16)
-assert fw.state()[3]
-fw.snapshot("automatic_running.png")
-before = fw.state()
-fw.scan(10000)  # a delayed frame advances once, not 55 times
-assert fw.state()[0].index(2) == before[0].index(2)+1
-fw.click(180,24)
-assert fw.state()[2] == 4
-fw.now = 0xFFFFFFC0
-fw.click(180,24)
-assert fw.state()[2] == 1
-before = fw.state()
-fw.scan(180)
-assert fw.now < 200 and fw.state()[0] != before[0]
-fw.click(40,290)  # manual mode starts with a fresh ready board
-assert fw.state()[2:] == (0, False)
-fw.click(200,165)
-for _ in range(8):
-    fw.scan(180)
-assert fw.state()[2] == 2
-fw.snapshot("manual_lost.png")
-lost = fw.state()
-fw.click(180,24)
-fw.click(200,165)
-assert fw.state() == lost  # terminal-state buttons are disabled
-fw.click(120,290)
-assert fw.state()[2] == 0
-fw.click(40,290)
-for _ in range(14041):
-    if fw.state()[2] != 1:
-        break
-    fw.call("Snake_Step")
-fw.scan()
-assert fw.state()[1:3] == (117,3)
-fw.snapshot("automatic_won.png")
-fw.click(200,290)
-fw.click(60,190)  # existing stopwatch page still works
-fw.click(40,236)
-fw.scan(1000)
-assert fw.number("page") == 5
-assert fw.call("ScreenMock_Time", fw.syms["mock"][0], fw.now) >= 1000
-fw.snapshot("stopwatch_regression.png")
-print("PASS: real UI navigation, direction touch, pause/resume/reset, preserved progress, long hold, move-out cancellation, delayed frame and tick wrap")
-(OUT/"result.json").write_text(json.dumps({"automatic_seeds":12,"automatic_steps":steps,"core":"PASS","ui":"PASS","hardware":"not tested"}, indent=2))
+
+if __name__ == "__main__":
+    main()

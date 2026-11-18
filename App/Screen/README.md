@@ -1,48 +1,52 @@
-# 屏幕菜单固件 T03 + 贪吃蛇
+# 屏幕与业务集成版（2026-11-18）
 
-2026-11-18，ILI9341、240×320 竖屏、电阻触摸。贪吃蛇接入后 Debug/Release 构建及 ARM 模拟执行检查通过；用户随后授权烧录，Debug 已下载、回读校验成功并复位运行，SWD 读取屏幕 stage=4、selftest=0x7f、页面=6。完整物理游戏操作仍待验收。屏幕基线交接：`D:/code/Project/实验室/lab2/ai_tasks/reports/screen_handoff.md`；本次接入交接：`D:/code/Project/实验室/lab2/ai_tasks/reports/snake_handoff.md`。
+当前主工程同时包含真实 Wave、Input、唯一 Sweep 控制器、HAL tick 秒表和贪吃蛇。波输出/输入页面已替换 T03 的“未接入”页面。中文资源、240×320 竖屏及已验证面板映射沿用原驱动。本次仅完成软件集成与模型验证，未烧录新固件或确认硬件精度。
 
-## 操作
+## 屏幕操作
 
-- 上电直接进入中文菜单，删除色条启动页、调试页和交互校准页。
-- “扩展”有效点击后切换一次，底部显示“扩展已开启/扩展已关闭”。默认关闭，切页保留，复位恢复关闭。
-- “贪吃蛇”进入 10×12 棋盘。深绿为蛇头，绿为蛇身，红为食物；每吃一份食物得一分，117 分吃满棋盘获胜。
-- 默认手动模式，按“开始”或有效方向启动；右侧“上/左/右/下”松开转向，拒绝反向及同一步内第二次转向。每 180ms 前进一步，碰墙/蛇身失败。
-- 顶部“开始/暂停/继续”控制运行；暂停时方向键禁用。“自动/手动”按钮显示将切换到的模式，切换时重开；自动模式立即沿闭环运行，方向键禁用。
-- “重置”保留当前模式重开；“返回”在离开时暂停并保留棋盘、分数和模式，再次进入按“继续”。就绪/失败/胜利状态保持；不追赶切页或卡顿期间遗漏的步数。
-- 波输出/输入检测页显示“未接入”和 `--`，移除固定假数值及信号状态循环；未接入的输出控件禁用。
-- 秒表保留原有 HAL tick 软件计时、开始/暂停、重置、圈/段和六条滚动记录；切页继续计时。尚未接入独立计时模块，未验收精度。
-- 全部页面移除“模拟”角标和 MOCK 英文提示。数字键盘继续暂缓。
+- 主菜单“波输出”：右上角 A/B 切换当前通道，频率/占空比按钮进入数字键盘，“开启/关闭”控制当前通道。切页保持输出。显示值来自已应用参数的定时器计算值；REQ 是请求值，WAIT/等待生效表示尚未装载。真实测量在输入页或示波器查看。
+- 数字键盘：首次数字替换原值；可清除、退格、取消或确认。非法值保持编辑页并显示错误。占空比可点选横条，按当前 1%/5% 步进取值，松开后选中，确认后才提交。0%/100% 是启用的恒低/恒高，与关闭不同。
+- 主菜单“扩展”：同时切换输出和输入的标准/扩展模式。标准为 1～200000 Hz、占空比 1%；扩展为 1～500000 Hz、占空比 5%。参数不合法时拒绝切换并给出原因，不自动改变波形；进入扩展前把两路占空比改为 5% 整数档，退出前把两路频率改到 200 kHz 以内。同步/自检/未完成请求期间切换会 BUSY。
+- 波输出页“扩展”：同步、相位、SPWM、自检入口。同步前先使 A/B 同频、正常 PWM 且均开启；相位为 B 滞后 A，0～360°、5°步进。同步期间先“退出”，再改频率或关闭通道。相位等待时不阻塞触摸。
+- SPWM：PA3，20 kHz 载波、50 Hz 正弦调制；“SPWM/关闭”启停。模拟正弦需按 App/Wave/FILTER.md 接滤波器，用示波器验证。
+- “输入检测”：后台持续采集 PA1，显示实测频率、占空比、有效/等待/无信号/超范围/错误和读数年龄。失效立即清除旧数字。“重测”建立新窗口；自检占用期间禁用，以免破坏扫频窗口。
+- “自检”：先断开外部信号源，再接 PA8→PA1，点开始。十点从 10 Hz 到 200 kHz，表中显示设定/实测/绝对频率误差百分比，P/F 为单点判定，“下页/上页”翻看两组。运行中可取消、可切页；全部通过且恢复成功才总 PASS。RESTORED 为已恢复原 A 参数和开关；恢复失败显示 FAIL/A LOCKED，保留实际所有权，需排查后复位。
+- 秒表：HAL tick 实时计时、开始/暂停、圈/段、最近六条记录；切页继续计时。贪吃蛇手动/自动、暂停/继续/重置、离页暂停并保留进度保持原逻辑。
 
-触摸按下高亮，松开触发一次；移出取消，切页防穿透。电阻屏建议使用触笔或指甲轻按。
+默认上电 A、B 和 SPWM 全部关闭，不会自动扫频。输出、采集、扫频、诊断、UI 全在单一主循环按顺序服务；中断只转发到各模块，不绘图。输出与输入的 .c/.h 均与最终交付提交一致。
 
-## 触摸映射
+## 引脚
 
-删除校准页前，通过 SWD HotPlug 读取 T02 有效 RAM 映射，保存到 `App/Screen/screen_touch_profile.h`。十六进制浮点常量精确保留原六个系数；固件开机加载，因此断电/复位后也可直接使用菜单，无需 EEPROM。
+| 功能 | 引脚 | 接插件 |
+| --- | --- | --- |
+| 输出 A | PA8 | JP3.33 |
+| 输出 B | PC7 | JP3.38 |
+| 输入 | PA1 | JP4.23 |
+| SPWM | PA3 | JP4.25 |
+| 地 | GND | JP4.41/42 |
 
-此配置仅适用于当前物理面板及 240×320 竖屏，更换屏幕或方向需重新生成映射。尺寸不匹配时拒绝映射，诊断 stage=0xE2。本版无交互校准恢复入口，保留拟合/映射算法及七项自检供维护。
+外部源接 PA1 前先用示波器确认实际 0～3.3 V、共地，并断开 PA8 回环。1 kHz、3 Vpp、+1.5 V 偏置、High-Z 可作为首测设置，但仍以实际引脚电压为准；此前 2 Vpp/0 偏置不适用。
 
-必须保留 T02 的 `ScreenTouch_Init()` 首次无条件 ADC 读取和每 200ms 空闲探测，不能恢复为仅 PEN 低才首次读取。GPIO/FSMC 由 CubeMX 独占初始化；屏幕服务不新增业务定时器、DMA、串口、EEPROM 或外部 SRAM。
-
-## 接口与维护
-
-GPIO/FSMC 初始化后调用 `ScreenApp_Init()`，主循环调用 `ScreenApp_Process(HAL_GetTick())`。新增 `bool ScreenApp_ExtensionsEnabled(void)` 可在主循环读取扩展选项；当前仅管理 UI 状态，未连接 PWM、捕获、相位等实际业务扩展。
-
-`App/Mock/screen_mock.c/.h` 暂保留为旧秒表 UI 的 HAL tick 状态容器，仅计时相关接口仍被使用。其频率、占空比、输入状态及输出开关字段不再用于页面显示或操作，后续接入真实计时模块时可移除此依赖。
-
-加入既有工具链 PATH 后，在工程目录运行：
+## 编译与回归
 
 ```powershell
+cmake --preset Debug
 cmake --build --preset Debug
+cmake --preset Release
 cmake --build --preset Release
-python BSP/Screen/tools/verify_assets.py
-python tests/verify_snake.py
+powershell -ExecutionPolicy Bypass -File tests/run_integration_checks.ps1
 ```
 
-游戏由 `App/Game/snake.c/.h` 提供，不依赖 HAL、LCD 或触摸；CMake 新增该源码及头文件目录，不增加硬件资源。`Snake_Reset()`、`Snake_SetDirection()`、`Snake_SetRunning()`、`Snake_Step()`、`Snake_GetState()` 仅在主循环使用。`Snake_SetRunning(false)` 暂停，`true` 启动或继续；终局状态必须重置。保持 10×12 棋盘，改尺寸需重新验证自动闭环及字节索引。
+完整检查脚本为本环境添加 STM32 工具链 PATH，并在需要时安装本地 Python 测试依赖。正式默认构建不含命令邮箱或测试替身；测试 ELF 是独立目标。LAB2_BUILD_BUSINESS_TESTS=ON 开启独立逻辑测试；LAB2_ENABLE_INPUT_DEBUG=ON、WAVE_ENABLE_DIAGNOSTICS=ON 仅用于诊断构建。Wave/Input/Sweep 在主工程始终使用本地真实源文件，不再从旧 W4 快照注入。
 
-`tests/verify_snake.py` 用 Unicorn 执行实际 Debug ELF，模拟 LCD/触摸边界；依赖 `unicorn==2.1.4`、`pyelftools==0.32`，可安装到 `build/snake_checks/python`。它检查游戏边界和真实 UI 触摸流程，输出截图、`result.json` 到 `build/snake_checks/`；不连接开发板，不验证物理触摸和 LCD 时序。
+验证包含 Debug/Release 各 982 项输入/扫频逻辑检查、实际 ARM 代码的定时器/DMA 受控模型、UI 触摸到真实业务的联动、十点扫频成功/断线失败/取消及恢复、双路与 SPWM、字体覆盖、游戏与秒表回归。模型不能替代上板的电压、误差、时序和并发测量。截图在 build/snake_checks/integrated_*.png，均为软件渲染，不是硬件照片。
 
-`BSP/Screen/tools/make_font.ps1` 从主机 SimSun 离线生成字库；新增文案需先补字模。当前 57 个 UI 汉字由 110 个有效字模覆盖，原始例程资源哈希检查通过。
+## 维护约定
 
-RAM 诊断保留 `g_screen_diag` 和 `g_touch_diag`，地址以对应 ELF 为准。stage=4、selftest=0x7f 表示初始化及算法检查通过，不替代手触验证。页面编号：菜单=2、波输出=3、输入=4、秒表=5、贪吃蛇=6。
+- 主循环初始化 Wave→Spwm→Input→Sweep→Screen；循环 Wave→Input→Sweep→WaveTest→可选 InputDebug→Screen。
+- .ioc、时钟、HAL、MSP、启动和链接脚本不改；业务定时器/DMA 由各自 CMSIS 端口管理，不再添加重复 MX_TIM 初始化或同名向量。
+- 保留电阻触摸首次无条件读取和每 200 ms 空闲探测，不能恢复成只依赖 PEN。轻按高亮、松开一次触发、移出取消、切页防穿透。
+- ScreenApp_ExtensionsEnabled() 反映 UI 成功协调后的两模块扩展模式。App/Mock 仅继续承担既有秒表状态，不参与波形或输入数据。
+- screen_touch_profile.h 仅适用于当前 240×320 物理面板；更换面板需重标定，尺寸不符拒绝映射。本版无交互重校准页。
+- 新文案通过 BSP/Screen/tools/make_font.ps1 生成字模，并运行 verify_assets.py；当前 98 个 UI 汉字由 139 字模覆盖。
+- RAM 诊断地址以 ELF 为准。g_screen_diag.stage=4、selftest=0x7f 只代表初始化和算法自检。页面编号：菜单2、PWM3、输入4、秒表5、游戏6、业务扩展7、扫频8、数字键盘9。

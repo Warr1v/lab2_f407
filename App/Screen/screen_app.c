@@ -3,6 +3,7 @@
 #include "screen_touch_profile.h"
 #include "screen_mock.h"
 #include "snake.h"
+#include "business_api.h"
 #include "tftlcd.h"
 #include "touch.h"
 #include "delay.h"
@@ -11,11 +12,16 @@
 #include <string.h>
 
 /* Preserve existing business page numbers for SWD diagnostics. */
-enum { PAGE_MENU=2, PAGE_PWM, PAGE_INPUT, PAGE_TIMER, PAGE_SNAKE };
+enum { PAGE_MENU=2, PAGE_PWM, PAGE_INPUT, PAGE_TIMER, PAGE_SNAKE,
+       PAGE_WAVE_MORE, PAGE_SWEEP, PAGE_NUMBER };
 enum { ACT_MENU=1, ACT_PWM, ACT_INPUT, ACT_TIMER, ACT_EXTENSIONS, ACT_SNAKE,
        ACT_START, ACT_RESET, ACT_LAP, ACT_SEGMENT, ACT_RECORDS,
        ACT_SNAKE_RUN, ACT_SNAKE_MODE, ACT_SNAKE_RESET,
-       ACT_SNAKE_UP, ACT_SNAKE_RIGHT, ACT_SNAKE_DOWN, ACT_SNAKE_LEFT };
+       ACT_SNAKE_UP, ACT_SNAKE_RIGHT, ACT_SNAKE_DOWN, ACT_SNAKE_LEFT,
+       ACT_CHANNEL, ACT_FREQUENCY, ACT_DUTY, ACT_OUTPUT, ACT_MORE,
+       ACT_SYNC, ACT_PHASE, ACT_SPWM, ACT_SWEEP, ACT_SWEEP_RUN,
+       ACT_SWEEP_PAGE, ACT_REACQUIRE, ACT_BACK, ACT_CLEAR, ACT_DELETE,
+       ACT_CONFIRM, ACT_SLIDER, ACT_DIGIT=100 };
 enum { BG=0xFFFF, FG=0x1082, ACCENT=0x051F, PALE=0xE73C, PRESSED=0xBDF7, ALERT=0xF800 };
 typedef struct { int16_t x,y,w,h; const char *label; uint8_t action; bool enabled; } Button;
 
@@ -23,7 +29,7 @@ volatile ScreenDiagnostics g_screen_diag = {.magic=0x53435231}; /* SCR1 */
 static ScreenCalibration calibration;
 static bool extensions_enabled;
 static ScreenMock mock;
-static Button buttons[8];
+static Button buttons[20];
 static unsigned button_count, record_page;
 static int16_t width, height;
 static int captured = -1;
@@ -32,8 +38,18 @@ static bool held, wait_release, gesture_cancelled, have_xy;
 static uint32_t pen_up_at, last_good_at, last_scan, last_refresh;
 static uint16_t raw_x, raw_y;
 static uint32_t touch_count;
-static char field_cache[10][40];
-static uint16_t field_colors[10];
+static char field_cache[16][64];
+static uint16_t field_colors[16];
+static WaveChannel channel;
+static unsigned sweep_page;
+static BizResult ui_result, mode_result;
+enum { EDIT_FREQUENCY, EDIT_DUTY, EDIT_PHASE };
+static unsigned edit_kind;
+static uint8_t edit_parent;
+static char edit_value[8];
+static bool edit_replace;
+static void draw_page(void);
+static void navigate(uint8_t next);
 enum { SNAKE_X=8, SNAKE_Y=48, SNAKE_PIXELS=16, SNAKE_STEP_MS=180 };
 static uint8_t snake_drawn[SNAKE_CELL_COUNT];
 static uint32_t last_snake_step;
@@ -66,7 +82,11 @@ static void field(unsigned slot,int x,int y,int w,int h,const char *s,uint16_t c
     snprintf(field_cache[slot],sizeof(field_cache[slot]),"%s",s);
     field_colors[slot]=color;
     fill(x,y,w,h,BG);
-    if(chinese) text(x,y,s,color,BG); else ascii(x,y,s,color);
+    if(chinese) text(x,y,s,color,BG);
+    else {
+        char clipped[64];snprintf(clipped,sizeof(clipped),"%.*s",w/8,s);
+        ascii(x,y,clipped,color);
+    }
 }
 static int text_width(const char *s)
 {
@@ -143,6 +163,282 @@ static void refresh_snake(void)
     snprintf(score,sizeof(score),"%s %u/117",game->automatic?"AUTO":"MAN",game->score);
     field(1,88,248,144,16,score,FG,false);
 }
+static const char *result_text(BizResult result)
+{
+    static const char *const labels[]={"OK", "PENDING", "BUSY: wait / sync / sweep",
+        "INVALID: check PWM A/B", "OUT OF RANGE", "STEP: duty 1%/5%, phase 5",
+        "UNSUPPORTED", "NOT INITIALIZED", "HARDWARE ERROR", "TIMEOUT", "CANCELLED"};
+    return (unsigned)result<sizeof(labels)/sizeof(labels[0])?labels[result]:"ERROR";
+}
+static bool accepted(BizResult result) { return result==BIZ_OK || result==BIZ_PENDING; }
+static bool sweep_locked(void)
+{
+    SweepSnapshot s;Sweep_GetSnapshot(&s);
+    return s.owns_a || s.state==SWEEP_RUNNING || s.state==SWEEP_RESTORING;
+}
+static void set_button(unsigned action_id,const char *label,bool enabled)
+{
+    for(unsigned i=0;i<button_count;++i) if(buttons[i].action==action_id) {
+        Button *b=&buttons[i];
+        if(b->enabled!=enabled || strcmp(b->label,label)!=0) {
+            b->label=label;b->enabled=enabled;draw_button(i,captured==(int)i);
+        }
+    }
+}
+static void format_frequency(char *s,size_t n,uint32_t millihz)
+{
+    snprintf(s,n,"%lu.%03lu Hz",(unsigned long)(millihz/1000U),(unsigned long)(millihz%1000U));
+}
+static void begin_edit(unsigned kind,uint8_t parent)
+{
+    WaveSnapshot w;WaveSyncSnapshot sync;
+    Wave_GetSnapshot(channel,&w);Wave_GetSyncSnapshot(&sync);
+    edit_kind=kind;edit_parent=parent;edit_replace=true;ui_result=BIZ_OK;
+    unsigned long value=kind==EDIT_PHASE?sync.applied_phase_deg:
+        kind==EDIT_DUTY?w.applied.duty_bp/100U:w.applied.frequency_hz;
+    snprintf(edit_value,sizeof(edit_value),"%lu",value);
+    navigate(PAGE_NUMBER);
+}
+static void change_mode(void)
+{
+    const BizMode old=Wave_GetMode();
+    const BizMode next=old==BIZ_MODE_STANDARD?BIZ_MODE_EXTENDED:BIZ_MODE_STANDARD;
+    ui_result=Wave_SetMode(next);
+    if(ui_result==BIZ_OK) {
+        ui_result=Input_SetMode(next);
+        if(ui_result!=BIZ_OK) {
+            /* No other business call can interleave this main-loop transaction. */
+            const BizResult rollback=Wave_SetMode(old);
+            if(rollback!=BIZ_OK) ui_result=rollback;
+        }
+    }
+    extensions_enabled=Wave_GetMode()==BIZ_MODE_EXTENDED && Input_GetMode()==BIZ_MODE_EXTENDED;
+    mode_result=ui_result;
+}
+static bool business_action(uint8_t id)
+{
+    WaveSnapshot w;WaveSyncSnapshot sync;SpwmSnapshot spwm;
+    if(id>=ACT_DIGIT && id<ACT_DIGIT+10) {
+        size_t n=strlen(edit_value);
+        if(edit_replace || (n==1 && edit_value[0]=='0')) {n=0;edit_replace=false;}
+        if(n<6) {edit_value[n]=(char)('0'+id-ACT_DIGIT);edit_value[n+1]=0;}
+        ui_result=BIZ_OK;return true;
+    }
+    switch(id) {
+    case ACT_CHANNEL:channel=channel==WAVE_CHANNEL_A?WAVE_CHANNEL_B:WAVE_CHANNEL_A;draw_page();return true;
+    case ACT_FREQUENCY:begin_edit(EDIT_FREQUENCY,PAGE_PWM);return true;
+    case ACT_DUTY:begin_edit(EDIT_DUTY,PAGE_PWM);return true;
+    case ACT_PHASE:begin_edit(EDIT_PHASE,PAGE_WAVE_MORE);return true;
+    case ACT_MORE:navigate(PAGE_WAVE_MORE);return true;
+    case ACT_BACK:navigate(page==PAGE_NUMBER?edit_parent:PAGE_PWM);return true;
+    case ACT_SWEEP:sweep_page=0;ui_result=BIZ_OK;navigate(PAGE_SWEEP);return true;
+    case ACT_SWEEP_PAGE:sweep_page^=1U;draw_page();return true;
+    case ACT_SWEEP_RUN: {
+        SweepSnapshot s;Sweep_GetSnapshot(&s);
+        ui_result=s.state==SWEEP_RUNNING?Sweep_Cancel():Sweep_Start();return true;
+    }
+    case ACT_REACQUIRE: {
+        uint32_t id_out;
+        ui_result=sweep_locked()?BIZ_BUSY:Input_BeginWindow(&id_out);return true;
+    }
+    case ACT_OUTPUT:
+        Wave_GetSnapshot(channel,&w);
+        ui_result=Wave_SetEnabled(channel,WAVE_OWNER_MANUAL,!w.enabled,NULL);return true;
+    case ACT_SYNC:
+        Wave_GetSyncSnapshot(&sync);
+        ui_result=Wave_SetSync(sync.state==WAVE_SYNC_OFF);return true;
+    case ACT_SPWM:
+        Spwm_GetSnapshot(&spwm);ui_result=spwm.running?Spwm_Stop():Spwm_Start();return true;
+    case ACT_CLEAR:edit_value[0]=0;edit_replace=false;ui_result=BIZ_OK;return true;
+    case ACT_DELETE: {
+        const size_t n=strlen(edit_value);if(n) edit_value[n-1]=0;
+        edit_replace=false;ui_result=BIZ_OK;return true;
+    }
+    case ACT_SLIDER: {
+        field_cache[2][0]=0; /* Release redraws the button even if the value is unchanged. */
+        int x=(int)g_screen_diag.x-12;if(x<0)x=0;if(x>215)x=215;
+        const unsigned step=Wave_GetMode()==BIZ_MODE_EXTENDED?5U:1U;
+        const unsigned value=((unsigned)x*(100U/step)+107U)/215U*step;
+        snprintf(edit_value,sizeof(edit_value),"%u",value);edit_replace=false;ui_result=BIZ_OK;return true;
+    }
+    case ACT_CONFIRM: {
+        if(!edit_value[0]) {ui_result=BIZ_INVALID_ARGUMENT;return true;}
+        const uint32_t value=(uint32_t)strtoul(edit_value,NULL,10);
+        if(edit_kind==EDIT_PHASE) ui_result=value>360U?BIZ_OUT_OF_RANGE:Wave_SetPhase((uint16_t)value);
+        else {
+            Wave_GetSnapshot(channel,&w);
+            WaveParams params=w.applied;
+            if(edit_kind==EDIT_DUTY) {
+                if(value>100U) {ui_result=BIZ_OUT_OF_RANGE;return true;}
+                params.duty_bp=(uint16_t)(value*100U);
+            } else params.frequency_hz=value;
+            ui_result=Wave_Apply(channel,WAVE_OWNER_MANUAL,&params,NULL);
+        }
+        if(accepted(ui_result)) navigate(edit_parent);
+        return true;
+    }
+    default:return false;
+    }
+}
+static void draw_business_page(void)
+{
+    switch(page) {
+    case PAGE_PWM:
+        title("波输出");
+        add_button(166,6,66,36,channel==WAVE_CHANNEL_A?"A":"B",ACT_CHANNEL,true);
+        ascii(8,48,channel==WAVE_CHANNEL_A?"A: PA8 / JP3.33":"B: PC7 / JP3.38",FG);
+        text(8,72,"频率",FG,BG);text(8,106,"占空比",FG,BG);
+        add_button(8,212,104,42,"频率",ACT_FREQUENCY,true);
+        add_button(128,212,104,42,"占空比",ACT_DUTY,true);
+        add_button(8,266,72,42,"开启",ACT_OUTPUT,true);
+        add_button(84,266,72,42,"扩展",ACT_MORE,true);
+        add_button(160,266,72,42,"返回",ACT_MENU,true);
+        break;
+    case PAGE_INPUT:
+        title("输入检测");
+        text(8,56,"频率",FG,BG);text(8,96,"占空比",FG,BG);
+        ascii(8,180,"PA1 / JP4.23 | GND 41/42",FG);
+        add_button(8,224,104,38,"重测",ACT_REACQUIRE,true);
+        add_button(128,224,104,38,"自检",ACT_SWEEP,true);
+        add_button(128,272,104,38,"返回",ACT_MENU,true);
+        break;
+    case PAGE_WAVE_MORE:
+        title("扩展");
+        add_button(8,78,104,42,"同步",ACT_SYNC,true);
+        add_button(128,78,104,42,"相位",ACT_PHASE,true);
+        add_button(8,158,104,42,"SPWM",ACT_SPWM,true);
+        add_button(128,158,104,42,"自检",ACT_SWEEP,true);
+        ascii(8,208,"SYNC: equal Hz, PWM A+B ON",FG);
+        ascii(8,228,"SPWM PA3: 20kHz -> 50Hz",FG);
+        add_button(128,270,104,38,"返回",ACT_BACK,true);
+        break;
+    case PAGE_SWEEP:
+        title("扫频自检");
+        ascii(8,78,"Set Hz / Meas Hz / Err %",FG);
+        ascii(8,228,"PA8 -> PA1; source OFF",FG);
+        add_button(8,266,72,42,"开始",ACT_SWEEP_RUN,true);
+        add_button(84,266,72,42,"下页",ACT_SWEEP_PAGE,true);
+        add_button(160,266,72,42,"返回",ACT_MENU,true);
+        break;
+    case PAGE_NUMBER: {
+        title(edit_kind==EDIT_FREQUENCY?"频率":edit_kind==EDIT_DUTY?"占空比":"相位");
+        add_button(80,6,72,36,"清除",ACT_CLEAR,true);
+        add_button(160,6,72,36,"取消",ACT_BACK,true);
+        const char *range=edit_kind==EDIT_PHASE?"0..360 deg, step 5":edit_kind==EDIT_DUTY?
+            (Wave_GetMode()==BIZ_MODE_EXTENDED?"0..100 %, step 5":"0..100 %, step 1"):
+            (Wave_GetMode()==BIZ_MODE_EXTENDED?"1..500000 Hz":"1..200000 Hz");
+        ascii(8,78,range,FG);
+        if(edit_kind==EDIT_DUTY) add_button(12,100,216,16,"",ACT_SLIDER,true);
+        static const char *const digits[]={"1","2","3","4","5","6","7","8","9"};
+        for(unsigned i=0;i<9;++i) add_button(8+(int)(i%3)*76,124+(int)(i/3)*42,72,36,digits[i],ACT_DIGIT+i+1,true);
+        add_button(8,250,72,36,"<-",ACT_DELETE,true);
+        add_button(84,250,72,36,"0",ACT_DIGIT,true);
+        add_button(160,250,72,36,"确认",ACT_CONFIRM,true);
+        break;
+    }
+    }
+    frame();
+}
+static void refresh_business(uint32_t now)
+{
+    char line[64];
+    if(page==PAGE_PWM) {
+        WaveSnapshot w;WaveSyncSnapshot sync;Wave_GetSnapshot(channel,&w);Wave_GetSyncSnapshot(&sync);
+        if(ui_result==BIZ_PENDING && !w.pending && !sync.phase_pending &&
+           (sync.state==WAVE_SYNC_OFF || sync.state==WAVE_SYNC_ON))
+            ui_result=w.last_result;
+        format_frequency(line,sizeof(line),w.calculated_frequency_millihz);
+        field(0,104,80,128,16,line,ACCENT,false);
+        snprintf(line,sizeof(line),"%u.%02u %%",w.calculated_duty_bp/100,w.calculated_duty_bp%100);
+        field(1,112,114,120,16,line,ACCENT,false);
+        const char *state=w.state==WAVE_UNINITIALIZED?"初始化失败":w.state==WAVE_FAULT?"输出故障":
+            w.owner==WAVE_OWNER_SELFTEST?"自检占用":w.pending?"等待生效":!w.enabled?"已关闭":
+            w.state==WAVE_DC_LOW?"恒低电平":w.state==WAVE_DC_HIGH?"恒高电平":"运行";
+        field(2,8,142,224,29,state,w.state==WAVE_FAULT?ALERT:FG,true);
+        snprintf(line,sizeof(line),"REQ %luHz %u%% %s",(unsigned long)w.requested.frequency_hz,
+            w.requested.duty_bp/100,w.pending?"WAIT":"");
+        field(3,8,176,224,16,line,FG,false);
+        field(4,8,194,224,16,result_text(ui_result),accepted(ui_result)?FG:ALERT,false);
+        const bool manual=w.owner==WAVE_OWNER_MANUAL && w.state!=WAVE_UNINITIALIZED && w.state!=WAVE_FAULT;
+        const bool ready=manual && !w.pending && !sync.phase_pending &&
+            (sync.state==WAVE_SYNC_OFF || sync.state==WAVE_SYNC_ON);
+        set_button(ACT_FREQUENCY,"频率",ready && sync.state==WAVE_SYNC_OFF);
+        set_button(ACT_DUTY,"占空比",ready);
+        set_button(ACT_OUTPUT,w.enabled?"关闭":"开启",manual && sync.state==WAVE_SYNC_OFF && (!w.pending || w.enabled));
+    } else if(page==PAGE_INPUT) {
+        InputSnapshot in;Input_GetSnapshot(&in);
+        const bool valid=in.state==INPUT_VALID;
+        if(valid) format_frequency(line,sizeof(line),in.frequency_millihz);else strcpy(line,"-- Hz");
+        field(0,104,64,128,16,line,ACCENT,false);
+        if(valid) snprintf(line,sizeof(line),"%u.%02u %%",in.duty_bp/100,in.duty_bp%100);else strcpy(line,"-- %");
+        field(1,112,104,120,16,line,ACCENT,false);
+        const char *state=in.state==INPUT_VALID?"信号有效":in.state==INPUT_WAITING?"等待信号":
+            in.state==INPUT_NO_SIGNAL?"无信号":in.state==INPUT_OUT_OF_RANGE?"频率超范围":"采集错误";
+        field(2,8,140,224,29,state,in.state>=INPUT_OUT_OF_RANGE?ALERT:FG,true);
+        snprintf(line,sizeof(line),"%s age:%lums",in.mode==BIZ_MODE_EXTENDED?"500k":"200k",
+            (unsigned long)(valid?(uint32_t)(now-in.published_ms):0));
+        field(3,8,202,224,16,line,FG,false);
+        set_button(ACT_REACQUIRE,"重测",!sweep_locked());
+        field(4,8,276,112,32,result_text(ui_result),accepted(ui_result)?FG:ALERT,false);
+    } else if(page==PAGE_WAVE_MORE) {
+        WaveSyncSnapshot sync;SpwmSnapshot spwm;Wave_GetSyncSnapshot(&sync);Spwm_GetSnapshot(&spwm);
+        if(ui_result==BIZ_PENDING && !sync.phase_pending &&
+           (sync.state==WAVE_SYNC_OFF || sync.state==WAVE_SYNC_ON) && spwm.last_result!=BIZ_PENDING)
+            ui_result=sync.last_result!=BIZ_OK?sync.last_result:spwm.last_result;
+        snprintf(line,sizeof(line),"SYNC:%s B:%u deg%s",sync.last_result==BIZ_HARDWARE_ERROR?"ERR":
+            sync.state==WAVE_SYNC_OFF?"OFF":sync.state==WAVE_SYNC_ON?"ON":"WAIT",
+            sync.applied_phase_deg,sync.phase_pending?" *":"");
+        field(0,8,50,224,16,line,FG,false);
+        snprintf(line,sizeof(line),"SPWM:%s 50Hz / PA3",spwm.last_result==BIZ_HARDWARE_ERROR?"ERROR":spwm.running?"ON":"OFF");
+        field(1,8,134,224,16,line,FG,false);
+        field(2,8,248,224,16,result_text(ui_result),accepted(ui_result)?FG:ALERT,false);
+        set_button(ACT_SYNC,sync.state==WAVE_SYNC_OFF?"同步":"退出",!sweep_locked() && sync.state!=WAVE_SYNC_STOPPING);
+        set_button(ACT_PHASE,"相位",sync.state==WAVE_SYNC_ON && sync.phase_applicable && !sync.phase_pending);
+        set_button(ACT_SPWM,spwm.running?"关闭":"SPWM",spwm.initialized);
+    } else if(page==PAGE_SWEEP) {
+        SweepSnapshot s;Sweep_GetSnapshot(&s);
+        const char *state=s.state==SWEEP_IDLE?"就绪":s.state==SWEEP_RUNNING?"运行":s.state==SWEEP_RESTORING?"恢复中":
+            s.state==SWEEP_PASS?"PASS":s.state==SWEEP_FAIL?"FAIL":"已取消";
+        field(0,8,44,160,29,state,s.state==SWEEP_FAIL?ALERT:FG,true);
+        snprintf(line,sizeof(line),"%u/10",s.completed);field(1,176,52,56,16,line,FG,false);
+        for(unsigned row=0;row<5;++row) {
+            const SweepPoint *p=&s.points[sweep_page*5+row];
+            if(p->state==SWEEP_POINT_PASS || p->state==SWEEP_POINT_OUT_OF_TOLERANCE) {
+                const uint64_t target=(uint64_t)p->set_frequency_hz*1000U;
+                const uint64_t diff=p->measured_frequency_millihz>target?p->measured_frequency_millihz-target:target-p->measured_frequency_millihz;
+                const unsigned err=target?(unsigned)((diff*10000U+target/2)/target):0;
+                char measured[16];
+                if(p->measured_frequency_millihz<10000000U)
+                    snprintf(measured,sizeof(measured),"%lu.%02lu",(unsigned long)(p->measured_frequency_millihz/1000U),
+                        (unsigned long)(p->measured_frequency_millihz%1000U/10U));
+                else snprintf(measured,sizeof(measured),"%lu",(unsigned long)(p->measured_frequency_millihz/1000U));
+                snprintf(line,sizeof(line),"%6lu %8s %u.%02u%c",(unsigned long)p->set_frequency_hz,measured,
+                    err/100,err%100,p->state==SWEEP_POINT_PASS?'P':'F');
+            } else snprintf(line,sizeof(line),"%6lu %8s %s",(unsigned long)p->set_frequency_hz,"--",
+                p->state==SWEEP_POINT_PENDING?"WAIT":p->state==SWEEP_POINT_NO_SIGNAL?"NO SIG":
+                p->state==SWEEP_POINT_OUTPUT_ERROR?"OUT ERR":"IN ERR");
+            field(2+row,8,104+(int)row*24,224,18,line,
+                p->state>SWEEP_POINT_PASS?ALERT:FG,false);
+        }
+        snprintf(line,sizeof(line),"%s %s",s.restored?"RESTORED":s.owns_a?"A LOCKED":"A FREE",result_text(ui_result));
+        field(7,8,246,224,16,line,s.state==SWEEP_FAIL?ALERT:FG,false);
+        set_button(ACT_SWEEP_RUN,s.state==SWEEP_RUNNING?"取消":"开始",
+            s.state==SWEEP_RUNNING || (!s.owns_a && s.state!=SWEEP_RESTORING));
+        set_button(ACT_SWEEP_PAGE,sweep_page?"上页":"下页",true);
+    } else if(page==PAGE_NUMBER) {
+        snprintf(line,sizeof(line),"%s %s",edit_value,edit_kind==EDIT_FREQUENCY?"Hz":edit_kind==EDIT_DUTY?"%":"deg");
+        field(0,8,50,224,20,line,ACCENT,false);
+        field(1,8,296,224,16,result_text(ui_result),accepted(ui_result)?FG:ALERT,false);
+        if(edit_kind==EDIT_DUTY) {
+            unsigned value=(unsigned)strtoul(edit_value,NULL,10);if(value>100)value=100;
+            snprintf(line,sizeof(line),"%u",value);
+            if(strcmp(field_cache[2],line)) {
+                strcpy(field_cache[2],line);fill(13,101,214,14,PALE);
+                fill(13,101,(int)(214U*value/100U),14,ACCENT);
+            }
+        }
+    }
+}
 static void draw_page(void)
 {
     LCD_Clear(BG);button_count=0;captured=-1;
@@ -157,23 +453,8 @@ static void draw_page(void)
         add_button(8,232,104,44,"扩展",ACT_EXTENSIONS,true);
         add_button(128,232,104,44,"贪吃蛇",ACT_SNAKE,true);
         frame();break;
-    case PAGE_PWM:
-        title("波输出");
-        text(8,56,"频率",FG,BG);ascii(112,64,"-- Hz",FG);
-        text(8,96,"占空比",FG,BG);ascii(144,104,"-- %",FG);
-        text(8,140,"未接入",ALERT,BG);
-        add_button(8,184,104,44,"频率",0,false);
-        add_button(128,184,104,44,"占空比",0,false);
-        add_button(8,240,104,44,"开启",0,false);
-        add_button(128,240,104,44,"返回",ACT_MENU,true);
-        frame();break;
-    case PAGE_INPUT:
-        title("输入检测");
-        text(8,56,"频率",FG,BG);ascii(112,64,"-- Hz",FG);
-        text(8,96,"占空比",FG,BG);ascii(144,104,"-- %",FG);
-        text(8,144,"未接入",ALERT,BG);
-        add_button(128,232,104,44,"返回",ACT_MENU,true);
-        frame();break;
+    case PAGE_PWM:case PAGE_INPUT:case PAGE_WAVE_MORE:case PAGE_SWEEP:case PAGE_NUMBER:
+        draw_business_page();break;
     case PAGE_SNAKE:
         title("贪吃蛇");
         memset(snake_drawn,0xff,sizeof(snake_drawn));
@@ -210,13 +491,14 @@ static void navigate(uint8_t next)
 }
 static void action(uint8_t id,uint32_t now)
 {
+    if(business_action(id)) {last_refresh=0;return;}
     switch(id) {
     case ACT_MENU:navigate(PAGE_MENU);return;
-    case ACT_PWM:navigate(PAGE_PWM);return;
-    case ACT_INPUT:navigate(PAGE_INPUT);return;
+    case ACT_PWM:ui_result=BIZ_OK;navigate(PAGE_PWM);return;
+    case ACT_INPUT:ui_result=BIZ_OK;navigate(PAGE_INPUT);return;
     case ACT_TIMER:navigate(PAGE_TIMER);return;
     case ACT_SNAKE:navigate(PAGE_SNAKE);return;
-    case ACT_EXTENSIONS:extensions_enabled=!extensions_enabled;break;
+    case ACT_EXTENSIONS:change_mode();break;
     case ACT_SNAKE_RUN:
         Snake_SetRunning(Snake_GetState()->status!=SNAKE_RUNNING);last_snake_step=now;break;
     case ACT_SNAKE_MODE:case ACT_SNAKE_RESET:
@@ -246,7 +528,9 @@ static void refresh(uint32_t now)
     last_refresh=now;
     char line[40];
     if(page==PAGE_MENU) {
-        field(0,8,284,224,29,extensions_enabled?"扩展已开启":"扩展已关闭",
+        field(1,8,44,224,16,mode_result!=BIZ_OK?result_text(mode_result):
+            extensions_enabled?"1..500kHz | duty step 5%":"1..200kHz | duty step 1%",mode_result!=BIZ_OK?ALERT:FG,false);
+        field(0,8,284,224,29,mode_result!=BIZ_OK?"切换失败":extensions_enabled?"扩展已开启":"扩展已关闭",
               extensions_enabled?ACCENT:FG,true);
     } else if(page==PAGE_TIMER) {
         char time[24];format_time(time,sizeof(time),ScreenMock_Time(&mock,now));
@@ -267,6 +551,7 @@ static void refresh(uint32_t now)
             field(2+n,8,136+20*n,224,20,line,FG,false);
         }
     }
+    refresh_business(now);
 }
 bool ScreenApp_ExtensionsEnabled(void)
 {
@@ -289,7 +574,8 @@ void ScreenApp_Init(void)
     calibration=screen_touch_profile;
     calibration.valid=calibration.valid && width==240 && height==320;
     g_screen_diag.calibration_result=calibration.valid?2:3;
-    extensions_enabled=false;
+    extensions_enabled=Wave_GetMode()==BIZ_MODE_EXTENDED && Input_GetMode()==BIZ_MODE_EXTENDED;
+    ui_result=BIZ_OK;channel=WAVE_CHANNEL_A;
     page=PAGE_MENU;g_screen_diag.page=page;
     draw_page();
     g_screen_diag.stage=g_screen_diag.selftest!=0x7f?0xE1:calibration.valid?4:0xE2;
@@ -341,7 +627,7 @@ void ScreenApp_Process(uint32_t now)
             if(wait_release) wait_release=false;
             else if(captured>=0) {
                 const unsigned index=(unsigned)captured;captured=-1;draw_button(index,false);
-                if(!gesture_cancelled && have_xy && (uint32_t)(now-last_good_at)<100)
+                if(buttons[index].enabled && !gesture_cancelled && have_xy && (uint32_t)(now-last_good_at)<100)
                     action(buttons[index].action,now);
             }
         }
